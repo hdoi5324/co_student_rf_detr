@@ -20,7 +20,8 @@ from co_student.dataset import (
 
 
 class CoStudentDataModule(RFDETRDataModule):
-    """RF-DETR datamodule with FCOS-style raw / weak / strong train views.
+    """RF-DETR datamodule with CoStudent-style raw / weak / strong train views.
+    Based on https://github.com/hustvl/CoStudent
 
     Training uses :class:`~co_student.costudent_dataset.CoStudentCocoDataset`
     and records 3×3 geometric transform matrices per view. Validation keeps

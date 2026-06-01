@@ -41,7 +41,7 @@ class TripleViewSample:
 
 
 class TripleViewAugmentor:
-    """Three independent pipelines aligned with FCOS Co-Student (Raw / Nor / Str)."""
+    """Three independent pipelines aligned with FCOS Co-Student (Raw / Nor / Str) from ."""
 
     def __init__(
         self,

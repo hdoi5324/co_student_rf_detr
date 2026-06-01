@@ -32,6 +32,9 @@ def bbox_overlaps(boxes1: torch.Tensor, boxes2: torch.Tensor, eps: float = 1e-6)
 
 def revision_pred(anchor: Detections, candidate: Detections) -> Detections:
     """Denoise *candidate* using higher-confidence *anchor* predictions (Revision_PRED)."""
+    anchor = _detections_float32(anchor)
+    candidate = _detections_float32(candidate)
+
     if anchor.boxes.numel() == 0 or candidate.boxes.numel() == 0:
         return _cat_detections(anchor, candidate)
 
@@ -104,11 +107,13 @@ def cvt_detections(
             scores=detections.scores.new_zeros((0,)),
             image_size=target_size,
         )
-    return Detections(
-        boxes=boxes,
-        labels=detections.labels[keep],
-        scores=detections.scores[keep],
-        image_size=target_size,
+    return _detections_float32(
+        Detections(
+            boxes=boxes,
+            labels=detections.labels[keep],
+            scores=detections.scores[keep],
+            image_size=target_size,
+        )
     )
 
 
@@ -255,6 +260,16 @@ def outputs_to_detections(
         labels=labels[keep],
         scores=scores[keep],
         image_size=image_size,
+    )
+
+
+def _detections_float32(detections: Detections) -> Detections:
+    """Cast box/score tensors to float32 (teacher under AMP may be bfloat16)."""
+    return Detections(
+        boxes=detections.boxes.float(),
+        labels=detections.labels,
+        scores=detections.scores.float(),
+        image_size=detections.image_size,
     )
 
 
