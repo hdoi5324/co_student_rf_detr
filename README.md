@@ -1,13 +1,19 @@
 ```bash
 uv run python train_costudent.py \
-  --train-image-dir datasets/loose/loose_17714/images \
-  --train-ann-file datasets/loose/loose_17714/annotations/instances_train_og_only.json \
+  --train-image-dir datasets/squidle_coco/squidle_urchin_full_train_sparse/images \
+  --train-ann-file datasets/squidle_coco/squidle_urchin_full_train_sparse/annotations/instances_train.json\
   --val-image-dir datasets/squidle_coco/squidle_urchin_2011/test2023 \
   --val-ann-file datasets/squidle_coco/squidle_urchin_2011/annotations/instances_test2023.json \
-  --wandb \
-  --wandb-project co-student-rf-detr 
+  --wandb --wandb-project co-student-rf-detr \
+  --weight-decay 3e-4 
   ```
 
+## Parameter changes
+weight-decay - set higher to clamp down large weight changes due to small dataset 3e-4
+lr, lr_encoder - reduce by factor of 10
+warmup epochs - 3 
+
+# notes on where changes were influenced from
 Defaults for lr, lr-encoder, warmup_epochs based on.
 
 1. RF-DETR Core Suggestions & Configuration API

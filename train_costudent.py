@@ -12,9 +12,13 @@ from uuid import uuid4
 from rfdetr.config import TrainConfig
 from rfdetr.training.trainer import build_trainer
 
+from co_student.coco_eval_callback import CoStudentCOCOEvalCallback
 from co_student.datamodule import CoStudentDataModule
 from co_student.dataset import count_categories, split_paths_from_args
+from co_student.mean_teacher_ema import CoStudentMeanTeacherCallback
 from co_student.module import CoStudentConfig, CoStudentRFDETRModule
+from rfdetr.training.callbacks.coco_eval import COCOEvalCallback
+from rfdetr.training.callbacks.ema import RFDETREMACallback
 
 
 def parse_args() -> argparse.Namespace:
@@ -58,11 +62,17 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--output-dir", default="./output/costudent", help="Checkpoints and logs")
     parser.add_argument("--model", default="nano", choices=["nano", "small", "medium", "large"])
-    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=4)
-    parser.add_argument("--grad-accum-steps", type=int, default=1)
-    parser.add_argument("--lr", type=float, default=5e-5)
-    parser.add_argument("--lr-encoder", type=float, default=7.5e-5)
+    parser.add_argument("--grad-accum-steps", type=int, default=4)
+    parser.add_argument("--lr", type=float, default=1e-5)
+    parser.add_argument("--lr-encoder", type=float, default=1.5e-5)
+    parser.add_argument(
+        "--weight-decay",
+        type=float,
+        default=None,
+        help="AdamW weight decay (default: TrainConfig default, 1e-4)",
+    )
     parser.add_argument(
         "--warmup-epochs",
         type=float,
@@ -75,6 +85,36 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--teacher-score-thresh", type=float, default=0.6)
     parser.add_argument("--matching-iou-thresh", type=float, default=0.5)
     parser.add_argument("--no-ema", action="store_true", help="Disable EMA teacher")
+    ema = parser.add_argument_group("teacher EMA (MeanTeacher)")
+    ema.add_argument(
+        "--ema-decay",
+        type=float,
+        default=0.999,
+        help="EMA momentum when using RF-DETR EMA (ignored with --mean-teacher)",
+    )
+    ema.add_argument(
+        "--ema-tau",
+        type=int,
+        default=0,
+        help="RF-DETR EMA warm-up steps (0 = constant decay; ignored with --mean-teacher)",
+    )
+    ema.add_argument(
+        "--ema-update-interval",
+        type=int,
+        default=1,
+        help="Update teacher every N optimizer steps (CoStudent interval=1)",
+    )
+    ema.add_argument(
+        "--mean-teacher",
+        action="store_true",
+        help="Use CoStudent/cvpods MeanTeacher momentum schedule instead of RF-DETR EMA tau ramp",
+    )
+    ema.add_argument(
+        "--ema-warm-up",
+        type=int,
+        default=0,
+        help="MeanTeacher warm_up (only with --mean-teacher; 0 matches CoStudent FCOS config)",
+    )
 
     logging = parser.add_argument_group("logging")
     logging.add_argument("--wandb", action="store_true", help="Log metrics and config to Weights & Biases")
@@ -184,12 +224,16 @@ def main() -> None:
         resume=args.resume,
         seed=args.seed,
         use_ema=not args.no_ema,
+        ema_decay=args.ema_decay,
+        ema_tau=args.ema_tau,
+        ema_update_interval=args.ema_update_interval,
         aug_config={},
         augmentation_backend="cpu",
         dataset_file="roboflow" if train_paths is None else "coco",
         wandb=args.wandb,
         project=args.wandb_project if args.wandb else None,
         run=wandb_run_name if args.wandb else None,
+        **({"weight_decay": args.weight_decay} if args.weight_decay is not None else {}),
     )
 
     costudent_config = CoStudentConfig(
@@ -214,6 +258,32 @@ def main() -> None:
     )
 
     trainer = build_trainer(train_config, wrapper.model_config)
+
+    trainer.callbacks = [
+        CoStudentCOCOEvalCallback(
+            max_dets=train_config.eval_max_dets,
+            segmentation=wrapper.model_config.segmentation_head,
+            eval_interval=train_config.eval_interval,
+            log_per_class_metrics=train_config.log_per_class_metrics,
+        )
+        if isinstance(cb, COCOEvalCallback)
+        else cb
+        for cb in trainer.callbacks
+    ]
+
+    if args.mean_teacher and not args.no_ema:
+        trainer.callbacks = [
+            cb
+            for cb in trainer.callbacks
+            if not isinstance(cb, RFDETREMACallback)
+        ]
+        trainer.callbacks.append(
+            CoStudentMeanTeacherCallback(
+                momentum=args.ema_decay,
+                warm_up=args.ema_warm_up,
+                update_interval_steps=args.ema_update_interval,
+            )
+        )
 
     if args.wandb:
         _log_wandb_config(
