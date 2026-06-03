@@ -62,6 +62,11 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--output-dir", default="./output/costudent", help="Checkpoints and logs")
     parser.add_argument("--model", default="nano", choices=["nano", "small", "medium", "large"])
+    parser.add_argument(
+        "--freeze-encoder",
+        action="store_true",
+        help="Freeze DINOv2 backbone weights (ModelConfig freeze_encoder=True)",
+    )
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--grad-accum-steps", type=int, default=4)
@@ -204,7 +209,7 @@ def main() -> None:
     import rfdetr.variants as variants
 
     model_cls = getattr(variants, MODEL_MAP[args.model])
-    wrapper = model_cls()
+    wrapper = model_cls(freeze_encoder=args.freeze_encoder)
 
     if args.wandb_run:
         wandb_run_name = args.wandb_run
@@ -290,6 +295,7 @@ def main() -> None:
             trainer,
             {
                 "model": args.model,
+                "freeze_encoder": args.freeze_encoder,
                 "num_classes": wrapper.model_config.num_classes,
                 **train_config.model_dump(),
                 **costudent_config.__dict__,
@@ -306,6 +312,7 @@ def main() -> None:
     config_path.write_text(
         json.dumps(
             {
+                "freeze_encoder": args.freeze_encoder,
                 "train_config": train_config.model_dump(),
                 "costudent_config": costudent_config.__dict__,
                 "train_paths": (
