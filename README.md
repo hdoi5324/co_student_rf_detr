@@ -9,6 +9,22 @@ uv run python train_costudent.py \
 --freeze-encoder
   ```
 
+```bash
+uv run python train_costudent.py \
+--train-image-dir datasets/squidle_coco/squidle_urchin_full_train_sparse/images \
+--train-ann-file datasets/squidle_coco/squidle_urchin_full_train_sparse/annotations/instances_train.json \
+--val-image-dir datasets/squidle_coco/squidle_urchin_2011/test2023 \
+--val-ann-file datasets/squidle_coco/squidle_urchin_2011/annotations/instances_test2023.json \
+--wandb --wandb-project co-student-rf-detr \
+--weight-decay 5e-4 \
+--freeze-encoder \
+--model small \
+--lr-drop-epochs 40,50 --lr-drop-gamma 0.1 
+```
+
+```bash
+uv run python train_costudent.py --train-image-dir datasets/squidle_coco/squidle_urchin_full_train_sparse/images --train-ann-file datasets/squidle_coco/squidle_urchin_full_train_sparse/annotations/instances_train.json --val-image-dir datasets/squidle_coco/squidle_urchin_2011/test2023 --val-ann-file datasets/squidle_coco/squidle_urchin_2011/annotations/instances_test2023.json --wandb --wandb-project co-student-rf-detr --weight-decay 3e-4 --freeze-encoder```
+
 ## Parameter changes
 weight-decay - set higher to clamp down large weight changes due to small dataset 3e-4
 lr, lr_encoder - reduce by factor of 10

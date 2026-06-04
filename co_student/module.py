@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 
 import torch
+from rfdetr._namespace import _namespace_from_configs
 from rfdetr.training.callbacks.ema import RFDETREMACallback
 from rfdetr.training.module_model import RFDETRModelModule
+from rfdetr.training.param_groups import get_param_dict
 from rfdetr.utilities.logger import get_logger
 from rfdetr.utilities.tensors import NestedTensor
 
@@ -19,6 +21,7 @@ from co_student.pseudo_labels import (
     result_to_detections,
     revision_pred,
 )
+from co_student.train_config import build_lr_lambda
 
 
 @dataclass
@@ -43,6 +46,37 @@ class CoStudentRFDETRModule(RFDETRModelModule):
         super().__init__(model_config, train_config)
         self.costudent_config = costudent_config or CoStudentConfig()
         self._warned_multi_scale: bool = False
+
+    def configure_optimizers(self) -> Dict[str, Any]:
+        """AdamW + LambdaLR with multi-epoch step decay from CoStudentTrainConfig."""
+        tc = self.train_config
+        ns = _namespace_from_configs(self.model_config, tc)
+
+        model_for_params = getattr(self.model, "_orig_mod", self.model)
+        param_dicts = get_param_dict(ns, model_for_params)
+        param_dicts = [p for p in param_dicts if p["params"].requires_grad]
+        optimizer = torch.optim.AdamW(
+            param_dicts,
+            lr=tc.lr,
+            weight_decay=tc.weight_decay,
+            fused=self._use_fused_optimizer,
+        )
+
+        total_steps = int(self.trainer.estimated_stepping_batches)
+        steps_per_epoch = max(1, total_steps // tc.epochs)
+        scheduler = torch.optim.lr_scheduler.LambdaLR(
+            optimizer,
+            lr_lambda=build_lr_lambda(
+                tc,
+                total_steps=total_steps,
+                steps_per_epoch=steps_per_epoch,
+            ),
+        )
+
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {"scheduler": scheduler, "interval": "step"},
+        }
 
     def on_train_batch_start(
         self,

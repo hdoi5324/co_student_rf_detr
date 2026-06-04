@@ -9,7 +9,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from rfdetr.config import TrainConfig
 from rfdetr.training.trainer import build_trainer
 
 from co_student.coco_eval_callback import CoStudentCOCOEvalCallback
@@ -17,6 +16,7 @@ from co_student.datamodule import CoStudentDataModule
 from co_student.dataset import count_categories, split_paths_from_args
 from co_student.mean_teacher_ema import CoStudentMeanTeacherCallback
 from co_student.module import CoStudentConfig, CoStudentRFDETRModule
+from co_student.train_config import CoStudentTrainConfig
 from rfdetr.training.callbacks.coco_eval import COCOEvalCallback
 from rfdetr.training.callbacks.ema import RFDETREMACallback
 
@@ -67,7 +67,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Freeze DINOv2 backbone weights (ModelConfig freeze_encoder=True)",
     )
-    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--grad-accum-steps", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-5)
@@ -83,6 +83,32 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=3.0,
         help="Linear LR warmup length in epochs",
+    )
+    lr_sched = parser.add_argument_group("learning rate schedule")
+    lr_sched.add_argument(
+        "--lr-scheduler",
+        default="step",
+        choices=["step", "cosine"],
+        help="LR schedule after warmup (default: step)",
+    )
+    lr_sched.add_argument(
+        "--lr-drop",
+        type=int,
+        default=None,
+        help="Single epoch for one LR step (×0.1). Default: 100 (no drop within 100 epochs). "
+        "Ignored when --lr-drop-epochs is set.",
+    )
+    lr_sched.add_argument(
+        "--lr-drop-epochs",
+        default=None,
+        metavar="EPOCHS",
+        help="Comma-separated epochs to multiply LR by --lr-drop-gamma (e.g. 40,50)",
+    )
+    lr_sched.add_argument(
+        "--lr-drop-gamma",
+        type=float,
+        default=0.1,
+        help="LR multiplier at each drop epoch (default: 0.1)",
     )
     parser.add_argument("--resume", default=None, help="Path to checkpoint to resume")
     parser.add_argument("--seed", type=int, default=42)
@@ -142,6 +168,15 @@ MODEL_MAP = {
     "medium": "RFDETRMedium",
     "large": "RFDETRLarge",
 }
+
+
+def _parse_epoch_list(value: str) -> list[int]:
+    epochs = [int(part.strip()) for part in value.split(",") if part.strip()]
+    if not epochs:
+        raise SystemExit("--lr-drop-epochs must list at least one epoch (e.g. 40,50)")
+    if any(e < 0 for e in epochs):
+        raise SystemExit("--lr-drop-epochs values must be non-negative integers")
+    return epochs
 
 
 def _ann_arg(file_arg: str | None, dir_arg: str | None) -> str | None:
@@ -217,7 +252,12 @@ def main() -> None:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         wandb_run_name = f"{args.model}-costudent-{stamp}-{uuid4().hex[:6]}"
 
-    train_config = TrainConfig(
+    lr_drop_epochs: list[int] = []
+    if args.lr_drop_epochs:
+        lr_drop_epochs = _parse_epoch_list(args.lr_drop_epochs)
+    lr_drop = args.lr_drop if args.lr_drop is not None else (max(lr_drop_epochs) if lr_drop_epochs else 100)
+
+    train_config = CoStudentTrainConfig(
         dataset_dir=dataset_dir,
         output_dir=str(output_dir),
         epochs=args.epochs,
@@ -226,6 +266,10 @@ def main() -> None:
         lr=args.lr,
         lr_encoder=args.lr_encoder,
         warmup_epochs=args.warmup_epochs,
+        lr_scheduler=args.lr_scheduler,
+        lr_drop=lr_drop,
+        lr_drop_epochs=lr_drop_epochs,
+        lr_drop_gamma=args.lr_drop_gamma,
         resume=args.resume,
         seed=args.seed,
         use_ema=not args.no_ema,
