@@ -15,6 +15,11 @@ from rfdetr.evaluation.matching import (
     merge_matching_data,
 )
 from rfdetr.training.callbacks.coco_eval import COCOEvalCallback
+from rfdetr.utilities.console import (
+    _IS_RICH_AVAILABLE,
+    _get_rich_console,
+    _render_overall_merged,
+)
 
 
 class CoStudentCOCOEvalCallback(COCOEvalCallback):
@@ -306,21 +311,20 @@ class CoStudentCOCOEvalCallback(COCOEvalCallback):
             title_pfx = f"{title_pfx} — {subtitle}"
         if not getattr(trainer, "is_global_zero", True):
             return
-        try:
-            from rich.console import Console
-            from rich.table import Table
-        except ImportError:
+        if not _IS_RICH_AVAILABLE:
             return
+
+        from rich.table import Table
 
         def _fmt(v: float) -> str:
             if v != v or v < 0:
                 return "—"
             return f"{v:.4f}"
 
-        console = Console(force_terminal=True)
+        console = _get_rich_console(trainer)
 
         def _render_all() -> None:
-            console.print(self._render_overall_merged(title_pfx, overall))
+            console.print(_render_overall_merged(title_pfx, overall, self._max_dets))
             if per_class:
                 t2 = Table(
                     title=f"{title_pfx} — Per-class Metrics",
