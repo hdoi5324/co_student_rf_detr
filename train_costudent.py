@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from rfdetr.training.trainer import build_trainer
 
+from co_student.checkpoint_callback import EnrichInferenceCheckpointsCallback
 from co_student.coco_eval_callback import CoStudentCOCOEvalCallback
 from co_student.datamodule import CoStudentDataModule
 from co_student.dataset import count_categories, split_paths_from_args
@@ -60,7 +61,7 @@ def parse_args() -> argparse.Namespace:
         help="Path to validation COCO JSON (overrides --val-ann-dir if both are set)",
     )
 
-    parser.add_argument("--output-dir", default="./output/costudent", help="Checkpoints and logs")
+    parser.add_argument("--output-dir", default="./outputs/costudent", help="Checkpoints and logs")
     parser.add_argument("--model", default="nano", choices=["nano", "small", "medium", "large"])
     parser.add_argument(
         "--freeze-encoder",
@@ -319,6 +320,7 @@ def main() -> None:
         else cb
         for cb in trainer.callbacks
     ]
+    trainer.callbacks.append(EnrichInferenceCheckpointsCallback(output_dir))
 
     if args.mean_teacher and not args.no_ema:
         trainer.callbacks = [

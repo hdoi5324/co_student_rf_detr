@@ -11,4 +11,4 @@ build/
 *.egg
 .DS_Store
 .idea/
-/output/
+/outputs/
