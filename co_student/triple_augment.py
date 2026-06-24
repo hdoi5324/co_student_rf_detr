@@ -41,7 +41,7 @@ class TripleViewSample:
 
 
 class TripleViewAugmentor:
-    """Three independent pipelines aligned with FCOS Co-Student (Raw / Nor / Str) from ."""
+    """Three independent pipelines aligned with FCOS Co-Student (Raw / Nor / Str)."""
 
     def __init__(
         self,
@@ -49,15 +49,17 @@ class TripleViewAugmentor:
         *,
         flip_prob: float = 0.5,
         seed: int = 0,
+        include_masks: bool = False,
     ) -> None:
         self.resolution = resolution
         self.flip_prob = flip_prob
         self.seed = seed
+        self.include_masks = include_masks
 
     def __call__(self, image: Image.Image, target: dict[str, Any], index: int) -> TripleViewSample:
         rng = np.random.default_rng(self.seed + index)
         base = _pil_to_rgb_np(image)
-        ann = _annotation_tensors(target)
+        ann = _annotation_tensors(target, include_masks=self.include_masks)
         meta = _base_meta(target)
 
         raw_img, raw_ann, raw_m = _pipeline_raw(base, ann, self.resolution, rng)
@@ -87,14 +89,19 @@ class _AnnotationTensors:
     labels: torch.Tensor
     area: torch.Tensor
     iscrowd: torch.Tensor
+    masks: Optional[torch.Tensor] = None
 
 
-def _annotation_tensors(target: dict[str, Any]) -> _AnnotationTensors:
+def _annotation_tensors(target: dict[str, Any], *, include_masks: bool) -> _AnnotationTensors:
+    masks = None
+    if include_masks and "masks" in target:
+        masks = target["masks"].clone()
     return _AnnotationTensors(
         boxes=target["boxes"].clone(),
         labels=target["labels"].clone(),
         area=target["area"].clone(),
         iscrowd=target["iscrowd"].clone(),
+        masks=masks,
     )
 
 
@@ -113,6 +120,8 @@ def _finalize_view(
     target["area"] = (xyxy[:, 2] - xyxy[:, 0]).clamp(min=0) * (xyxy[:, 3] - xyxy[:, 1]).clamp(min=0)
     target["orig_size"] = meta.get("orig_size", torch.tensor([h, w]))
     target["size"] = torch.tensor([h, w])
+    if ann.masks is not None:
+        target["masks"] = ann.masks
 
     pil = Image.fromarray(image)
     tensor = _to_float(_to_image(pil))
@@ -137,12 +146,45 @@ def _box_keep_mask(boxes: torch.Tensor, w: int, h: int) -> torch.Tensor:
 
 def _filter_ann(ann: _AnnotationTensors, w: int, h: int) -> _AnnotationTensors:
     keep = _box_keep_mask(ann.boxes, w, h)
+    masks = ann.masks[keep] if ann.masks is not None else None
     return _AnnotationTensors(
         boxes=ann.boxes[keep],
         labels=ann.labels[keep],
         area=ann.area[keep],
         iscrowd=ann.iscrowd[keep],
+        masks=masks,
     )
+
+
+def _resize_masks(masks: torch.Tensor, width: int, height: int) -> torch.Tensor:
+    if masks.numel() == 0:
+        return torch.zeros((0, height, width), dtype=torch.bool)
+    resized = []
+    for i in range(masks.shape[0]):
+        mask_np = cv2.resize(
+            masks[i].numpy().astype(np.uint8),
+            (width, height),
+            interpolation=cv2.INTER_NEAREST,
+        )
+        resized.append(mask_np)
+    return torch.as_tensor(np.stack(resized), dtype=torch.bool)
+
+
+def _warp_masks_affine(masks: torch.Tensor, m2x3: np.ndarray, width: int, height: int) -> torch.Tensor:
+    if masks.numel() == 0:
+        return torch.zeros((0, height, width), dtype=torch.bool)
+    warped = []
+    for i in range(masks.shape[0]):
+        mask_np = cv2.warpAffine(
+            masks[i].numpy().astype(np.uint8),
+            m2x3,
+            (width, height),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+        warped.append(mask_np)
+    return torch.as_tensor(np.stack(warped), dtype=torch.bool)
 
 
 def _pipeline_raw(
@@ -196,7 +238,13 @@ def _resize_only(
     h0, w0 = image.shape[:2]
     image = cv2.resize(image, (resolution, resolution), interpolation=cv2.INTER_LINEAR)
     m = resize_matrix(w0, h0, resolution, resolution)
-    ann = _transform_ann(ann, m, resolution, resolution)
+    masks = _resize_masks(ann.masks, resolution, resolution) if ann.masks is not None else None
+    ann = _transform_ann(
+        _AnnotationTensors(ann.boxes, ann.labels, ann.area, ann.iscrowd, masks),
+        m,
+        resolution,
+        resolution,
+    )
     return image, ann, m
 
 
@@ -210,7 +258,12 @@ def _horizontal_flip(
     x0, x1 = boxes[:, 0].clone(), boxes[:, 2].clone()
     boxes[:, 0] = w - x1
     boxes[:, 2] = w - x0
-    return image, _AnnotationTensors(boxes, ann.labels, ann.area, ann.iscrowd), hflip_matrix(w)
+    masks = ann.masks.flip(-1) if ann.masks is not None else None
+    return (
+        image,
+        _AnnotationTensors(boxes, ann.labels, ann.area, ann.iscrowd, masks),
+        hflip_matrix(w),
+    )
 
 
 def _transform_ann(
@@ -220,7 +273,18 @@ def _transform_ann(
     max_h: int,
 ) -> _AnnotationTensors:
     if ann.boxes.numel() == 0:
-        return ann
+        empty_masks = (
+            torch.zeros((0, max_h, max_w), dtype=torch.bool)
+            if ann.masks is not None
+            else None
+        )
+        return _AnnotationTensors(
+            ann.boxes,
+            ann.labels,
+            ann.area,
+            ann.iscrowd,
+            empty_masks,
+        )
     from co_student.geometric import bbox2points, points2bbox
 
     m = torch.tensor(matrix, dtype=torch.float32)
@@ -230,7 +294,7 @@ def _transform_ann(
     out = out[:, :2] / out[:, 2:3]
     warped = points2bbox(out, max_w, max_h)
     return _filter_ann(
-        _AnnotationTensors(warped, ann.labels, ann.area, ann.iscrowd),
+        _AnnotationTensors(warped, ann.labels, ann.area, ann.iscrowd, ann.masks),
         max_w,
         max_h,
     )
@@ -269,7 +333,13 @@ def _random_affine(
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=(114, 114, 114),
     )
-    ann = _transform_ann(ann, affine_matrix_from_cv2(m2), w, h)
+    masks = _warp_masks_affine(ann.masks, m2, w, h) if ann.masks is not None else None
+    ann = _transform_ann(
+        _AnnotationTensors(ann.boxes, ann.labels, ann.area, ann.iscrowd, masks),
+        affine_matrix_from_cv2(m2),
+        w,
+        h,
+    )
     return image, ann, affine_matrix_from_cv2(m2)
 
 

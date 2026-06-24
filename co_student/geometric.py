@@ -1,9 +1,10 @@
-"""Geometric transforms and box warping (FCOS Co-Student convention)."""
+"""Geometric transforms and box/mask warping (FCOS Co-Student convention)."""
 
 from __future__ import annotations
 
 from typing import Union
 
+import cv2
 import numpy as np
 import torch
 
@@ -92,6 +93,41 @@ def cvt_boxes_xyxy(
     min_x, min_y, max_x, max_y = warped.unbind(dim=1)
     keep = (min_x < max_x) & (min_y < max_y)
     return warped[keep], keep
+
+
+def cvt_masks(
+    masks: torch.Tensor,
+    source_tm: TransformMatrix,
+    target_tm: TransformMatrix,
+    target_size: tuple[int, int],
+    keep: torch.Tensor,
+) -> torch.Tensor:
+    """Warp ``(N, H, W)`` bool masks from source view coordinates into the target view.
+
+    Uses the same ``keep`` index produced by :func:`cvt_boxes_xyxy` so boxes and masks stay aligned.
+    """
+    h_tgt, w_tgt = target_size
+    if masks.numel() == 0:
+        return masks.new_zeros((0, h_tgt, w_tgt), dtype=torch.bool)
+    if keep.numel() == 0:
+        return masks.new_zeros((0, h_tgt, w_tgt), dtype=torch.bool)
+
+    m = warp_matrix(source_tm, target_tm)
+    m_inv = np.linalg.inv(m)
+    kept = masks[keep.cpu()]
+    warped = []
+    for i in range(kept.shape[0]):
+        mask_np = kept[i].detach().cpu().numpy().astype(np.uint8)
+        out = cv2.warpPerspective(
+            mask_np,
+            m_inv,
+            (w_tgt, h_tgt),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+        warped.append(out)
+    return torch.as_tensor(np.stack(warped), device=masks.device, dtype=torch.bool)
 
 
 def _to_numpy(matrix: TransformMatrix) -> np.ndarray:

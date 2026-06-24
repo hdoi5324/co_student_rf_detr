@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train RF-DETR with Co-Student for sparsely annotated object detection."""
+"""Train RF-DETR with Co-Student for sparsely annotated object detection or segmentation."""
 
 from __future__ import annotations
 
@@ -61,13 +61,36 @@ def parse_args() -> argparse.Namespace:
         help="Path to validation COCO JSON (overrides --val-ann-dir if both are set)",
     )
 
-    parser.add_argument("--output-dir", default="./outputs/costudent", help="Checkpoints and logs")
-    parser.add_argument("--model", default="nano", choices=["nano", "small", "medium", "large"])
-    parser.add_argument(
+    model = parser.add_argument_group("model")
+    model.add_argument(
+        "--task",
+        default="detection",
+        choices=["detection", "segmentation"],
+        help="Train a bbox detector (default) or an RF-DETR Seg model with mask supervision",
+    )
+    model.add_argument("--model", default="nano", choices=["nano", "small", "medium", "large"])
+    model.add_argument(
         "--freeze-encoder",
         action="store_true",
         help="Freeze DINOv2 backbone weights (ModelConfig freeze_encoder=True)",
     )
+
+    pseudo = parser.add_argument_group("Co-Student pseudo labels")
+    pseudo.add_argument(
+        "--pseudo-labels",
+        dest="pseudo_labels",
+        action="store_true",
+        default=None,
+        help="Enable bbox pseudo-label merging across weak/strong views (default: on for detection)",
+    )
+    pseudo.add_argument(
+        "--no-pseudo-labels",
+        dest="pseudo_labels",
+        action="store_false",
+        help="Train on sparse GT only (default for segmentation; required until mask pseudo-labels exist)",
+    )
+
+    parser.add_argument("--output-dir", default="./outputs/costudent", help="Checkpoints and logs")
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--grad-accum-steps", type=int, default=4)
@@ -163,12 +186,29 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-MODEL_MAP = {
+MODEL_MAP_DETECTION = {
     "nano": "RFDETRNano",
     "small": "RFDETRSmall",
     "medium": "RFDETRMedium",
     "large": "RFDETRLarge",
 }
+
+MODEL_MAP_SEGMENTATION = {
+    "nano": "RFDETRSegNano",
+    "small": "RFDETRSegSmall",
+    "medium": "RFDETRSegMedium",
+    "large": "RFDETRSegLarge",
+}
+
+
+def _resolve_pseudo_labels(args: argparse.Namespace) -> bool:
+    if args.pseudo_labels is not None:
+        return args.pseudo_labels
+    return True
+
+
+def _validate_task_args(args: argparse.Namespace, use_pseudo_labels: bool) -> None:
+    del args, use_pseudo_labels
 
 
 def _parse_epoch_list(value: str) -> list[int]:
@@ -237,6 +277,9 @@ def _align_num_classes(wrapper, train_ann_path: Path | None, dataset_dir: str) -
 
 def main() -> None:
     args = parse_args()
+    use_pseudo_labels = _resolve_pseudo_labels(args)
+    _validate_task_args(args, use_pseudo_labels)
+
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -244,8 +287,17 @@ def main() -> None:
 
     import rfdetr.variants as variants
 
-    model_cls = getattr(variants, MODEL_MAP[args.model])
+    model_map = MODEL_MAP_DETECTION if args.task == "detection" else MODEL_MAP_SEGMENTATION
+    model_cls = getattr(variants, model_map[args.model])
     wrapper = model_cls(freeze_encoder=args.freeze_encoder)
+
+    if args.task == "segmentation":
+        print(
+            "Segmentation task: RF-DETR Seg with mask-aware Co-Student pseudo labels "
+            "(box IoU matching, raster mask warp across views)."
+        )
+    elif not use_pseudo_labels:
+        print("Detection task with pseudo-label merging disabled; training on sparse GT only.")
 
     if args.wandb_run:
         wandb_run_name = args.wandb_run
@@ -290,6 +342,7 @@ def main() -> None:
         student_score_thresh=args.student_score_thresh,
         teacher_score_thresh=args.teacher_score_thresh,
         matching_iou_thresh=args.matching_iou_thresh,
+        use_pseudo_labels=use_pseudo_labels,
     )
 
     train_ann_path = train_paths.ann_path if train_paths else None
@@ -340,8 +393,10 @@ def main() -> None:
         _log_wandb_config(
             trainer,
             {
+                "task": args.task,
                 "model": args.model,
                 "freeze_encoder": args.freeze_encoder,
+                "use_pseudo_labels": use_pseudo_labels,
                 "num_classes": wrapper.model_config.num_classes,
                 **train_config.model_dump(),
                 **costudent_config.__dict__,
@@ -358,7 +413,9 @@ def main() -> None:
     config_path.write_text(
         json.dumps(
             {
+                "task": args.task,
                 "freeze_encoder": args.freeze_encoder,
+                "use_pseudo_labels": use_pseudo_labels,
                 "train_config": train_config.model_dump(),
                 "costudent_config": costudent_config.__dict__,
                 "train_paths": (

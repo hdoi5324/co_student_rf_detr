@@ -72,6 +72,24 @@ def count_categories(ann_path: str | Path) -> int:
     return len(data["categories"])
 
 
+def drop_unannotated_images(dataset: CocoDetection) -> CocoDetection:
+    """Remove COCO images that have no instance annotations from *dataset*."""
+    coco = dataset.coco
+    before = len(dataset.ids)
+    dataset.ids = [
+        img_id for img_id in dataset.ids if len(coco.getAnnIds(imgIds=img_id)) > 0
+    ]
+    dropped = before - len(dataset.ids)
+    if dropped:
+        logger.info(
+            "Dropped %d images with no annotations (%d -> %d)",
+            dropped,
+            before,
+            len(dataset.ids),
+        )
+    return dataset
+
+
 def build_coco_base_from_paths(
     image_set: str,
     args: Any,
@@ -113,18 +131,22 @@ def build_costudent_train_dataset(
     remap_category_ids: bool = True,
 ) -> CoStudentCocoDataset:
     """Training dataset with raw / weak / strong views and transform matrices."""
-    base = build_coco_base_from_paths(
-        "train",
-        args,
-        resolution,
-        paths,
-        remap_category_ids=remap_category_ids,
+    include_masks = getattr(args, "segmentation_head", False)
+    base = drop_unannotated_images(
+        build_coco_base_from_paths(
+            "train",
+            args,
+            resolution,
+            paths,
+            remap_category_ids=remap_category_ids,
+        )
     )
     return CoStudentCocoDataset(
         base,
         resolution,
         augment_seed=augment_seed,
         flip_prob=flip_prob,
+        include_masks=include_masks,
     )
 
 
@@ -149,18 +171,21 @@ def build_costudent_train_from_roboflow(
         ann_file,
         resolution,
     )
-    base = CocoDetection(
-        img_folder,
-        ann_file,
-        transforms=None,
-        include_masks=include_masks,
-        remap_category_ids=True,
+    base = drop_unannotated_images(
+        CocoDetection(
+            img_folder,
+            ann_file,
+            transforms=None,
+            include_masks=include_masks,
+            remap_category_ids=True,
+        )
     )
     return CoStudentCocoDataset(
         base,
         resolution,
         augment_seed=augment_seed,
         flip_prob=flip_prob,
+        include_masks=include_masks,
     )
 
 
