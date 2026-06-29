@@ -67,7 +67,7 @@ def warp_matrix(source_tm: TransformMatrix, target_tm: TransformMatrix) -> np.nd
     """Return M such that p_target = M @ p_source (homogeneous)."""
     s = _to_numpy(source_tm)
     t = _to_numpy(target_tm)
-    return t @ np.linalg.inv(s)
+    return t @ np.linalg.inv(s) # np.matmul
 
 
 def cvt_boxes_xyxy(
@@ -78,7 +78,7 @@ def cvt_boxes_xyxy(
     max_h: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Warp absolute xyxy boxes from source view coordinates to target view.
-
+    Based on costudent.FCOS.cvt_bbox
     Returns:
         warped boxes and a boolean ``keep`` mask into the input *boxes*.
     """

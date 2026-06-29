@@ -15,6 +15,19 @@ uv run python train_costudent.py \
   --freeze-encoder
 ```
 
+
+```bash
+uv run python train_costudent.py \
+  --task detection \
+  --train-image-dir datasets/exemplarsegmentation_outputs/coco_19616/images \
+  --train-ann-file datasets/exemplarsegmentation_outputs/coco_19616/annotations/annotations_coco.json \
+  --val-image-dir datasets/exemplarsegmentation_outputs/coco_13393/images \
+  --val-ann-file datasets/exemplarsegmentation_outputs/coco_13393/annotations/annotations_coco.json \
+  --model small \
+  --wandb --wandb-project co-student-rf-detr \
+  --freeze-encoder 
+```
+
 Pseudo-label merging is **on by default** for detection (`--pseudo-labels` is implicit). Disable with `--no-pseudo-labels` to train on sparse GT boxes only.
 
 ## Segmentation
@@ -90,6 +103,34 @@ uv run python train_costudent.py \
 --model small \
 --lr-drop-epochs 40,50 --lr-drop-gamma 0.1 
 ```
+
+```bash
+uv run python train_costudent.py \
+  --task detection \
+  --train-image-dir datasets/exemplarsegmentation_outputs/coco_19616/images \
+  --train-ann-file datasets/exemplarsegmentation_outputs/coco_19616/annotations/annotations_coco.json \
+  --val-image-dir datasets/exemplarsegmentation_outputs/coco_13393/images \
+  --val-ann-file datasets/exemplarsegmentation_outputs/coco_13393/annotations/annotations_coco.json \
+--wandb --wandb-project co-student-rf-detr \
+--weight-decay 5e-4 \
+--freeze-encoder \
+--model small \
+--mean-teacher \
+--lr-drop-epochs 40,50 --lr-drop-gamma 0.1 
+```
+
+### Visualise
+```bash
+uv run python viz_predictions.py \
+  --checkpoint outputs/costudent/checkpoint_39_inference_ema.pth \
+  --image-dir datasets/exemplarsegmentation_outputs/coco_13393/images \
+  --ann-file datasets/exemplarsegmentation_outputs/coco_13393/annotations/annotations_coco.json \
+  --show-gt \
+  --max-images 40 \
+  --output-dir viz_outputs
+  ```
+
+
 
 ## Parameter changes
 weight-decay - set higher to clamp down large weight changes due to small dataset 3e-4

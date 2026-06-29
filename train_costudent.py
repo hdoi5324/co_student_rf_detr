@@ -167,7 +167,7 @@ def parse_args() -> argparse.Namespace:
     ema.add_argument(
         "--ema-warm-up",
         type=int,
-        default=0,
+        default=100,
         help="MeanTeacher warm_up (only with --mean-teacher; 0 matches CoStudent FCOS config)",
     )
 
@@ -409,13 +409,18 @@ def main() -> None:
 
     trainer.fit(module, datamodule=datamodule, ckpt_path=train_config.resume)
 
+    class_names = getattr(datamodule, "class_names", None)
     config_path = output_dir / "costudent_config.json"
     config_path.write_text(
         json.dumps(
             {
                 "task": args.task,
+                "model": args.model,
+                "model_name": model_map[args.model],
                 "freeze_encoder": args.freeze_encoder,
                 "use_pseudo_labels": use_pseudo_labels,
+                "model_config": wrapper.model_config.model_dump(),
+                "class_names": list(class_names) if class_names else None,
                 "train_config": train_config.model_dump(),
                 "costudent_config": costudent_config.__dict__,
                 "train_paths": (

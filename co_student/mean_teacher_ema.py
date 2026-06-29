@@ -30,7 +30,7 @@ class CoStudentMeanTeacherCallback(RFDETREMACallback):
     def __init__(
         self,
         momentum: float = 0.999,
-        warm_up: int = 0,
+        warm_up: int = 100,
         update_interval_steps: int = 1,
         use_buffers: bool = True,
     ) -> None:

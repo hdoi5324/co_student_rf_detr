@@ -16,6 +16,7 @@ _INFERENCE_CHECKPOINTS = (
 )
 
 LAST_EMA_CHECKPOINT = "checkpoint_last_ema.pth"
+LAST_REGULAR_CHECKPOINT = "checkpoint_last_regular.pth"
 
 
 def _model_config_dict(pl_module: LightningModule) -> dict[str, Any] | None:
@@ -118,21 +119,96 @@ def _extract_ema_state_dict(trainer: Trainer, output_dir: Path) -> dict[str, tor
     return _ema_state_dict_from_last_ckpt(output_dir)
 
 
+def _student_state_dict_from_last_ckpt(output_dir: Path) -> dict[str, torch.Tensor] | None:
+    last_ckpt = output_dir / "last.ckpt"
+    if not last_ckpt.is_file():
+        return None
+    checkpoint = torch.load(last_ckpt, map_location="cpu", weights_only=False)
+    state = checkpoint.get("state_dict")
+    if not isinstance(state, dict):
+        return None
+    prefix = "model."
+    model_state = {
+        key.removeprefix(prefix): value
+        for key, value in state.items()
+        if isinstance(key, str) and key.startswith(prefix)
+    }
+    return model_state or None
+
+
+def _extract_student_state_dict(
+    trainer: Trainer,
+    pl_module: LightningModule,
+    output_dir: Path,
+    *,
+    prefer_last_ckpt: bool = False,
+) -> dict[str, torch.Tensor]:
+    if prefer_last_ckpt:
+        from_ckpt = _student_state_dict_from_last_ckpt(output_dir)
+        if from_ckpt is not None:
+            return from_ckpt
+    return BestModelCallback._get_live_model_state_dict(pl_module)
+
+
+def _build_inference_checkpoint(
+    pl_module: LightningModule,
+    trainer: Trainer,
+    model_state_dict: dict[str, torch.Tensor],
+) -> dict[str, Any] | None:
+    model_config = _model_config_dict(pl_module)
+    if model_config is None:
+        return None
+
+    args_dict = _train_args_dict(trainer, pl_module)
+    model_name = BestModelCallback._resolve_model_name(pl_module)
+    checkpoint = BestModelCallback._build_checkpoint_payload(
+        model_state_dict,
+        args_dict,
+        trainer,
+        model_name=model_name,
+        model_config_dict=model_config,
+    )
+    _apply_inference_metadata(checkpoint, pl_module, model_config, args=args_dict)
+    return checkpoint
+
+
+def _write_inference_checkpoint(
+    path: Path | str,
+    pl_module: LightningModule,
+    trainer: Trainer,
+    model_state_dict: dict[str, torch.Tensor],
+) -> None:
+    checkpoint = _build_inference_checkpoint(pl_module, trainer, model_state_dict)
+    if checkpoint is None:
+        return
+    ckpt_path = Path(path)
+    ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(checkpoint, ckpt_path)
+
+
 def enrich_inference_checkpoint(
     path: Path | str,
     pl_module: LightningModule,
     *,
     trainer: Trainer | None = None,
     ema: bool = False,
+    live: bool = False,
+    prefer_last_ckpt: bool = False,
 ) -> None:
     """Add inference metadata and optionally write an EMA-weight checkpoint.
 
-    When ``ema=False`` (default), enrich an existing RF-DETR ``.pth`` checkpoint in place
-    with ``model_config`` and ``args.num_classes`` so :func:`RFDETR.from_checkpoint` works.
+    When ``ema=False`` and ``live=False`` (default), enrich an existing RF-DETR ``.pth``
+    checkpoint in place with ``model_config`` and ``args.num_classes`` so
+    :func:`RFDETR.from_checkpoint` works.
 
     When ``ema=True``, build a new checkpoint at *path* using the EMA teacher weights from
     the active EMA callback, or fall back to ``last.ckpt`` callback state.
+
+    When ``live=True``, build a new checkpoint at *path* from the live student model.
     """
+    if ema and live:
+        raise ValueError("ema and live are mutually exclusive")
+
     ckpt_path = Path(path)
     model_config = _model_config_dict(pl_module)
     if model_config is None:
@@ -144,18 +220,19 @@ def enrich_inference_checkpoint(
         ema_state_dict = _extract_ema_state_dict(trainer, ckpt_path.parent)
         if ema_state_dict is None:
             return
-        args_dict = _train_args_dict(trainer, pl_module)
-        model_name = BestModelCallback._resolve_model_name(pl_module)
-        checkpoint = BestModelCallback._build_checkpoint_payload(
-            ema_state_dict,
-            args_dict,
+        _write_inference_checkpoint(ckpt_path, pl_module, trainer, ema_state_dict)
+        return
+
+    if live:
+        if trainer is None:
+            raise ValueError("trainer is required when live=True")
+        student_state_dict = _extract_student_state_dict(
             trainer,
-            model_name=model_name,
-            model_config_dict=model_config,
+            pl_module,
+            ckpt_path.parent,
+            prefer_last_ckpt=prefer_last_ckpt,
         )
-        _apply_inference_metadata(checkpoint, pl_module, model_config, args=args_dict)
-        ckpt_path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(checkpoint, ckpt_path)
+        _write_inference_checkpoint(ckpt_path, pl_module, trainer, student_state_dict)
         return
 
     if not ckpt_path.is_file():
@@ -197,11 +274,28 @@ class EnrichInferenceCheckpointsCallback(Callback):
             return
         enrich_inference_checkpoint(path, pl_module, trainer=trainer, ema=True)
 
+    def _save_regular_checkpoint(
+        self,
+        trainer: Trainer,
+        pl_module: LightningModule,
+        path: Path,
+        *,
+        prefer_last_ckpt: bool = False,
+    ) -> None:
+        enrich_inference_checkpoint(
+            path,
+            pl_module,
+            trainer=trainer,
+            live=True,
+            prefer_last_ckpt=prefer_last_ckpt,
+        )
+
     def on_train_epoch_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
         if not trainer.is_global_zero or getattr(trainer, "sanity_checking", False):
             return
 
         if _should_save_last_checkpoint(pl_module):
+            self._save_regular_checkpoint(trainer, pl_module, self._output_dir / LAST_REGULAR_CHECKPOINT)
             self._save_ema_checkpoint(trainer, pl_module, self._output_dir / LAST_EMA_CHECKPOINT)
 
         if _should_save_interval_checkpoint(trainer, pl_module):
@@ -217,4 +311,10 @@ class EnrichInferenceCheckpointsCallback(Callback):
             return
         for name in _INFERENCE_CHECKPOINTS:
             enrich_inference_checkpoint(self._output_dir / name, pl_module)
+        self._save_regular_checkpoint(
+            trainer,
+            pl_module,
+            self._output_dir / LAST_REGULAR_CHECKPOINT,
+            prefer_last_ckpt=True,
+        )
         self._save_ema_checkpoint(trainer, pl_module, self._output_dir / LAST_EMA_CHECKPOINT)
