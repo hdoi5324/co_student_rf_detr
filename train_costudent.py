@@ -12,6 +12,11 @@ from uuid import uuid4
 from rfdetr.training.trainer import build_trainer
 
 from co_student.checkpoint_callback import EnrichInferenceCheckpointsCallback
+from co_student.checkpoint_resume import (
+    checkpoint_needs_weights_only_resume,
+    load_checkpoint_dict,
+    load_weights_only_checkpoint,
+)
 from co_student.coco_eval_callback import CoStudentCOCOEvalCallback
 from co_student.datamodule import CoStudentDataModule
 from co_student.dataset import count_categories, split_paths_from_args
@@ -74,6 +79,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Freeze DINOv2 backbone weights (ModelConfig freeze_encoder=True)",
     )
+    model.add_argument(
+        "--focal-alpha",
+        type=float,
+        default=0.25,
+        help="Focal loss alpha for classification loss and Hungarian matching (default: 0.25)",
+    )
 
     pseudo = parser.add_argument_group("Co-Student pseudo labels")
     pseudo.add_argument(
@@ -94,8 +105,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--grad-accum-steps", type=int, default=4)
-    parser.add_argument("--lr", type=float, default=1e-5)
-    parser.add_argument("--lr-encoder", type=float, default=1.5e-5)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr-encoder", type=float, default=1.5e-4)
     parser.add_argument(
         "--weight-decay",
         type=float,
@@ -135,6 +146,14 @@ def parse_args() -> argparse.Namespace:
         help="LR multiplier at each drop epoch (default: 0.1)",
     )
     parser.add_argument("--resume", default=None, help="Path to checkpoint to resume")
+    parser.add_argument(
+        "--resume-weights-only",
+        action="store_true",
+        help=(
+            "Load model weights, EMA, and epoch counter only (fresh optimizer). "
+            "Auto-enabled when the checkpoint has no optimizer/LR scheduler state."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--student-score-thresh", type=float, default=0.5)
     parser.add_argument("--teacher-score-thresh", type=float, default=0.6)
@@ -329,6 +348,7 @@ def main() -> None:
         ema_decay=args.ema_decay,
         ema_tau=args.ema_tau,
         ema_update_interval=args.ema_update_interval,
+        focal_alpha=args.focal_alpha,
         aug_config={},
         augmentation_backend="cpu",
         dataset_file="roboflow" if train_paths is None else "coco",
@@ -407,7 +427,23 @@ def main() -> None:
             },
         )
 
-    trainer.fit(module, datamodule=datamodule, ckpt_path=train_config.resume)
+    resume_path = train_config.resume
+    weights_only = args.resume_weights_only
+    if resume_path:
+        peek = load_checkpoint_dict(resume_path)
+        if checkpoint_needs_weights_only_resume(peek):
+            if not weights_only:
+                print(
+                    "Checkpoint has no optimizer/LR scheduler state; "
+                    "using weights-only resume (fresh optimizer, same epoch counter)."
+                )
+            weights_only = True
+
+    if resume_path and weights_only:
+        load_weights_only_checkpoint(resume_path, module, trainer)
+        trainer.fit(module, datamodule=datamodule, ckpt_path=None)
+    else:
+        trainer.fit(module, datamodule=datamodule, ckpt_path=resume_path)
 
     class_names = getattr(datamodule, "class_names", None)
     config_path = output_dir / "costudent_config.json"

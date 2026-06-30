@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Dict, Optional, Tuple, Union
 
 import torch
 from rfdetr._namespace import _namespace_from_configs
+from rfdetr.models._defaults import MODEL_DEFAULTS
+from rfdetr.models.lwdetr import build_criterion_from_config
 from rfdetr.training.callbacks.ema import RFDETREMACallback
 from rfdetr.training.module_model import RFDETRModelModule
 from rfdetr.training.param_groups import get_param_dict
@@ -48,6 +50,19 @@ class CoStudentRFDETRModule(RFDETRModelModule):
         super().__init__(model_config, train_config)
         self.costudent_config = costudent_config or CoStudentConfig()
         self._warned_multi_scale: bool = False
+        self._apply_focal_alpha()
+
+    def _apply_focal_alpha(self) -> None:
+        """Rebuild criterion/matcher when focal_alpha differs from RF-DETR defaults."""
+        focal_alpha = float(getattr(self.train_config, "focal_alpha", MODEL_DEFAULTS.focal_alpha))
+        if focal_alpha == MODEL_DEFAULTS.focal_alpha:
+            return
+        defaults = replace(MODEL_DEFAULTS, focal_alpha=focal_alpha)
+        self.criterion, self.postprocess = build_criterion_from_config(
+            self.model_config,
+            self.train_config,
+            defaults=defaults,
+        )
 
     def configure_optimizers(self) -> Dict[str, Any]:
         """AdamW + LambdaLR with multi-epoch step decay from CoStudentTrainConfig."""

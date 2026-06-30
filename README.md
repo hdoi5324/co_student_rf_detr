@@ -107,8 +107,8 @@ uv run python train_costudent.py \
 ```bash
 uv run python train_costudent.py \
   --task detection \
-  --train-image-dir datasets/exemplarsegmentation_outputs/coco_19616/images \
-  --train-ann-file datasets/exemplarsegmentation_outputs/coco_19616/annotations/annotations_coco.json \
+  --train-image-dir datasets/exemplarsegmentation_outputs/coco_19627/images \
+  --train-ann-file datasets/exemplarsegmentation_outputs/coco_19627/annotations/annotations_coco.json \
   --val-image-dir datasets/exemplarsegmentation_outputs/coco_13393/images \
   --val-ann-file datasets/exemplarsegmentation_outputs/coco_13393/annotations/annotations_coco.json \
 --wandb --wandb-project co-student-rf-detr \
@@ -116,18 +116,57 @@ uv run python train_costudent.py \
 --freeze-encoder \
 --model small \
 --mean-teacher \
---lr-drop-epochs 40,50 --lr-drop-gamma 0.1 
+--lr-drop-epochs 40,50 --lr-drop-gamma 0.1 \
+--output-dir outputs/costudent_19627_gtonly \
+--no-pseudo-labels
+
+
+# Restart
+uv run python train_costudent.py \
+  --task detection \
+  --train-image-dir datasets/exemplarsegmentation_outputs/coco_19616/images \
+  --train-ann-file datasets/exemplarsegmentation_outputs/coco_19616/annotations/annotations_coco.json \
+  --val-image-dir datasets/exemplarsegmentation_outputs/coco_13393/images \
+  --val-ann-file datasets/exemplarsegmentation_outputs/coco_13393/annotations/annotations_coco.json \
+--wandb --wandb-project co-student-rf-detr \
+--weight-decay 5e-4 \
+--model small \
+--mean-teacher \
+--lr-drop-epochs 50 --lr-drop-gamma 0.1 \
+  --lr 1e-5 \
+  --lr-encoder 1e-6 \
+  --warmup-epochs 0 \
+  --epochs 50 \
+  --resume outputs/costudent/checkpoint_39.ckpt   --resume-weights-only
+
+```
+
+```bash
+uv run python train_costudent.py \
+  --task detection \
+  --train-image-dir datasets/exemplarsegmentation_outputs/coco_19617/images \
+  --train-ann-file datasets/exemplarsegmentation_outputs/coco_19617/annotations/annotations_coco.json \
+  --val-image-dir datasets/exemplarsegmentation_outputs/coco_13393/images \
+  --val-ann-file datasets/exemplarsegmentation_outputs/coco_13393/annotations/annotations_coco.json \
+--wandb --wandb-project co-student-rf-detr \
+--weight-decay 5e-4 \
+--freeze-encoder \
+--model small \
+--mean-teacher \
+--lr-drop-epochs 40,50 --lr-drop-gamma 0.1 \
+--batch-size 16 --grad-accum-steps 1 --lr 1e-4 \
+--output-dir outputs/costudent_19617_lr1e_4
 ```
 
 ### Visualise
 ```bash
 uv run python viz_predictions.py \
-  --checkpoint outputs/costudent/checkpoint_39_inference_ema.pth \
+  --checkpoint outputs/costudent/checkpoint_last_regular.pth \
   --image-dir datasets/exemplarsegmentation_outputs/coco_13393/images \
   --ann-file datasets/exemplarsegmentation_outputs/coco_13393/annotations/annotations_coco.json \
   --show-gt \
   --max-images 40 \
-  --output-dir viz_outputs
+  --output-dir outputs/costudent/viz_outputs
   ```
 
 

@@ -28,6 +28,15 @@ class CoStudentTrainConfig(TrainConfig):
         lt=1.0,
         description="LR multiplier applied at each epoch in lr_drop_epochs (or at lr_drop).",
     )
+    focal_alpha: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Alpha for focal classification loss and Hungarian matching cost "
+            "(RF-DETR ModelDefaults default: 0.25)."
+        ),
+    )
 
 
 def resolve_lr_drop_epochs(train_config: TrainConfigType) -> list[int]:
