@@ -143,42 +143,55 @@ uv run python train_costudent.py \
 
 ```bash
 uv run python train_costudent.py \
-  --task detection \
-  --train-image-dir datasets/exemplarsegmentation_outputs/coco_19617/images \
-  --train-ann-file datasets/exemplarsegmentation_outputs/coco_19617/annotations/annotations_coco.json \
-  --val-image-dir datasets/exemplarsegmentation_outputs/coco_13393/images \
-  --val-ann-file datasets/exemplarsegmentation_outputs/coco_13393/annotations/annotations_coco.json \
+--task detection \
+--train-manifest configs/train_19616_19633.json \
+--val-image-dir datasets/exemplarsegmentation_outputs/coco_13393/images \
+--val-ann-file datasets/exemplarsegmentation_outputs/coco_13393/annotations/annotations_coco.json \
 --wandb --wandb-project co-student-rf-detr \
 --weight-decay 5e-4 \
 --freeze-encoder \
 --model small \
 --mean-teacher \
---lr-drop-epochs 40,50 --lr-drop-gamma 0.1 \
---batch-size 16 --grad-accum-steps 1 --lr 1e-4 \
---output-dir outputs/costudent_19617_lr1e_4
+--sahi-slice \
+--no-pseudo-labels --epochs 50 \
+--sahi-keep-negative-samples \
+--output-dir outputs/costudent_multi
+
+--batch-size 16 --grad-accum-steps 1 
+
 ```
 
 ### Visualise
 ```bash
-uv run python viz_predictions.py \
-  --checkpoint outputs/costudent/checkpoint_last_regular.pth \
-  --image-dir datasets/exemplarsegmentation_outputs/coco_13393/images \
-  --ann-file datasets/exemplarsegmentation_outputs/coco_13393/annotations/annotations_coco.json \
-  --show-gt \
-  --max-images 40 \
-  --output-dir outputs/costudent/viz_outputs
-  
-  
   uv run python viz_predictions.py \
-  --checkpoint outputs/costudent_19617_gtonly/checkpoint_last_regular.pth \
+  --checkpoint outputs/costudent_19617_sahi_withneg/checkpoint_last_regular.pth \
   --image-dir datasets/exemplarsegmentation_outputs/coco_13393/images \
   --ann-file datasets/exemplarsegmentation_outputs/coco_13393/annotations/annotations_coco.json \
   --show-gt --threshold 0.35 \
   --max-images 40 \
-  --output-dir outputs/costudent/viz_outputs \
-  --sahi --sahi-overlap 0.2 
+  --output-dir outputs/costudent_19617_sahi_withneg/viz_outputs
+  
+  
+  uv run python viz_predictions.py \
+  --checkpoint outputs/costudent_19617_sahi_withneg/checkpoint_last_regular.pth \
+  --image-dir datasets/exemplarsegmentation_outputs/coco_13393/images \
+  --ann-file datasets/exemplarsegmentation_outputs/coco_13393/annotations/annotations_coco.json \
+  --show-gt --threshold 0.35 \
+  --max-images 40 \
+  --sahi --sahi-overlap 0.2 \
+  --output-dir outputs/costudent_19617_sahi_withneg/viz_outputs_sahi 
    ```
 
+
+### coco eval
+```bash
+uv run python eval_coco.py \
+  --checkpoint outputs/costudent_19617_sahi_withneg/checkpoint_last_regular.pth \
+  --image-dir datasets/exemplarsegmentation_outputs/coco_13393/images \
+  --ann-file datasets/exemplarsegmentation_outputs/coco_13393/annotations/annotations_coco.json \
+  --sahi --sahi-overlap 0.2 --threshold 0.1 \
+  --output-dir outputs/costudent_19617_sahi_withneg/eval_sahi
+  ```
 
 
 ## Parameter changes

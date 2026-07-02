@@ -18,6 +18,7 @@ from co_student.checkpoint_resume import (
     load_weights_only_checkpoint,
 )
 from co_student.coco_eval_callback import CoStudentCOCOEvalCallback
+from co_student.coco_merge import merge_coco_sources, resolve_train_sources, sources_to_config
 from co_student.datamodule import CoStudentDataModule
 from co_student.dataset import count_categories, split_paths_from_args
 from co_student.mean_teacher_ema import CoStudentMeanTeacherCallback
@@ -32,24 +33,24 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     data = parser.add_argument_group("dataset")
     data.add_argument(
-        "--dataset-dir",
+        "--train-manifest",
         default=None,
-        help="Roboflow/COCO dataset root (legacy layout). Optional when train paths are set.",
+        help="JSON manifest listing train_sources (image_dir + ann_file per source)",
     )
     data.add_argument(
-        "--train-image-dir",
+        "--train-source",
+        action="append",
         default=None,
-        help="Directory containing training images",
+        metavar="SPEC",
+        help=(
+            "Training source as image_dir:ann_path or name:image_dir:ann_path. "
+            "Repeat for multiple sources."
+        ),
     )
     data.add_argument(
-        "--train-ann-dir",
+        "--train-merge-cache-dir",
         default=None,
-        help="Directory containing the training COCO JSON (e.g. _annotations.coco.json)",
-    )
-    data.add_argument(
-        "--train-ann-file",
-        default=None,
-        help="Path to training COCO JSON (overrides --train-ann-dir if both are set)",
+        help="Cache directory for merged training COCO (default: <output-dir>/merged_train)",
     )
     data.add_argument(
         "--val-image-dir",
@@ -275,25 +276,29 @@ def _ann_arg(file_arg: str | None, dir_arg: str | None) -> str | None:
     return dir_arg
 
 
-def _resolve_dataset_args(args: argparse.Namespace) -> tuple[str, object | None, object | None]:
-    train_ann = _ann_arg(args.train_ann_file, args.train_ann_dir)
-    val_ann = _ann_arg(args.val_ann_file, args.val_ann_dir)
-    custom_train = args.train_image_dir is not None and train_ann is not None
-
-    if custom_train:
-        train_paths = split_paths_from_args(args.train_image_dir, train_ann)
-        val_paths = None
-        if args.val_image_dir and val_ann:
-            val_paths = split_paths_from_args(args.val_image_dir, val_ann)
-        dataset_dir = args.dataset_dir or str(train_paths.image_dir.parent)
-        return dataset_dir, train_paths, val_paths
-
-    if not args.dataset_dir:
-        raise SystemExit(
-            "Provide either --dataset-dir (Roboflow layout) or both "
-            "--train-image-dir and --train-ann-dir/--train-ann-file."
+def _resolve_dataset_args(
+    args: argparse.Namespace,
+    *,
+    output_dir: Path,
+) -> tuple[str, object, object | None, list[dict[str, str]]]:
+    try:
+        train_sources = resolve_train_sources(
+            manifest=args.train_manifest,
+            train_source_args=args.train_source,
         )
-    return args.dataset_dir, None, None
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    merge_cache_dir = Path(args.train_merge_cache_dir or output_dir / "merged_train")
+    train_paths = merge_coco_sources(train_sources, merge_cache_dir)
+    train_sources_config = sources_to_config(train_sources)
+
+    val_ann = _ann_arg(args.val_ann_file, args.val_ann_dir)
+    val_paths = None
+    if args.val_image_dir and val_ann:
+        val_paths = split_paths_from_args(args.val_image_dir, val_ann)
+
+    dataset_dir = str(train_paths.image_dir.parent)
+    return dataset_dir, train_paths, val_paths, train_sources_config
 
 
 def _log_wandb_config(trainer, config: dict) -> None:
@@ -332,7 +337,13 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    dataset_dir, train_paths, val_paths = _resolve_dataset_args(args)
+    dataset_dir, train_paths, val_paths, train_sources_config = _resolve_dataset_args(
+        args,
+        output_dir=output_dir,
+    )
+    print(f"Merged training data: {train_paths.ann_path}")
+    print(f"  images: {train_paths.image_dir}")
+    print(f"  sources: {len(train_sources_config)}")
 
     import rfdetr.variants as variants
 
@@ -342,11 +353,6 @@ def main() -> None:
 
     sahi_slice_config: dict[str, object] | None = None
     if args.sahi_slice:
-        if train_paths is None:
-            raise SystemExit(
-                "--sahi-slice requires explicit --train-image-dir and "
-                "--train-ann-dir/--train-ann-file"
-            )
         slice_size = int(wrapper.model_config.resolution)
         cache_dir = Path(args.sahi_cache_dir or output_dir / "sahi_train")
         train_paths = prepare_sliced_train_paths(
@@ -416,7 +422,7 @@ def main() -> None:
         focal_alpha=args.focal_alpha,
         aug_config={},
         augmentation_backend="cpu",
-        dataset_file="roboflow" if train_paths is None else "coco",
+        dataset_file="coco",
         wandb=args.wandb,
         project=args.wandb_project if args.wandb else None,
         run=wandb_run_name if args.wandb else None,
@@ -430,7 +436,7 @@ def main() -> None:
         use_pseudo_labels=use_pseudo_labels,
     )
 
-    train_ann_path = train_paths.ann_path if train_paths else None
+    train_ann_path = train_paths.ann_path
     _align_num_classes(wrapper, train_ann_path, dataset_dir)
 
     module = CoStudentRFDETRModule(
@@ -485,8 +491,9 @@ def main() -> None:
                 "num_classes": wrapper.model_config.num_classes,
                 **train_config.model_dump(),
                 **costudent_config.__dict__,
-                "train_image_dir": str(train_paths.image_dir) if train_paths else None,
-                "train_ann_file": str(train_paths.ann_path) if train_paths else None,
+                "train_image_dir": str(train_paths.image_dir),
+                "train_ann_file": str(train_paths.ann_path),
+                "train_sources": train_sources_config,
                 "val_image_dir": str(val_paths.image_dir) if val_paths else None,
                 "val_ann_file": str(val_paths.ann_path) if val_paths else None,
                 **({"sahi_slice": sahi_slice_config} if sahi_slice_config else {}),
@@ -525,11 +532,11 @@ def main() -> None:
                 "class_names": list(class_names) if class_names else None,
                 "train_config": train_config.model_dump(),
                 "costudent_config": costudent_config.__dict__,
-                "train_paths": (
-                    {"image_dir": str(train_paths.image_dir), "ann_file": str(train_paths.ann_path)}
-                    if train_paths
-                    else None
-                ),
+                "train_paths": {
+                    "image_dir": str(train_paths.image_dir),
+                    "ann_file": str(train_paths.ann_path),
+                },
+                "train_sources": train_sources_config,
                 "val_paths": (
                     {"image_dir": str(val_paths.image_dir), "ann_file": str(val_paths.ann_path)}
                     if val_paths

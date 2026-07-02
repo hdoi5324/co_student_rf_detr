@@ -1,0 +1,14 @@
+{
+  "train_sources": [
+    {
+      "name": "coco_19633",
+      "image_dir": "datasets/exemplarsegmentation_outputs/coco_19633/images",
+      "ann_file": "datasets/exemplarsegmentation_outputs/coco_19633/annotations/annotations_coco.json"
+    },
+    {
+      "name": "coco_19616",
+      "image_dir": "datasets/exemplarsegmentation_outputs/coco_19617/images",
+      "ann_file": "datasets/exemplarsegmentation_outputs/coco_19617/annotations/annotations_coco.json"
+    }
+  ]
+}
