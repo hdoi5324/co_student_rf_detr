@@ -15,6 +15,7 @@ from pycocotools.coco import COCO
 from rfdetr import RFDETR
 
 from co_student.dataset import resolve_coco_ann_path
+from co_student.sahi_inference import SahiInferenceConfig, SahiPredictor
 
 _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 
@@ -62,6 +63,31 @@ def parse_args() -> argparse.Namespace:
         "--optimize",
         action="store_true",
         help="Call model.optimize_for_inference() before predicting",
+    )
+
+    sahi = parser.add_argument_group("SAHI sliced inference")
+    sahi.add_argument(
+        "--sahi",
+        action="store_true",
+        help="Run sliced inference on full-resolution images (default: single resized pass)",
+    )
+    sahi.add_argument(
+        "--sahi-overlap",
+        type=float,
+        default=0.2,
+        help="Fractional overlap between adjacent inference tiles (default: 0.2)",
+    )
+    sahi.add_argument(
+        "--sahi-slice-size",
+        type=int,
+        default=None,
+        help="Tile height/width in pixels (default: checkpoint model resolution)",
+    )
+    sahi.add_argument(
+        "--sahi-postprocess",
+        default="GREEDYNMM",
+        choices=["GREEDYNMM", "NMS"],
+        help="How to merge overlapping tile predictions (default: GREEDYNMM)",
     )
     return parser.parse_args()
 
@@ -196,6 +222,22 @@ def main() -> None:
         model.optimize_for_inference()
 
     class_names = model.class_names
+    sahi_predictor: SahiPredictor | None = None
+    if args.sahi:
+        sahi_predictor = SahiPredictor.from_rfdetr(
+            model,
+            threshold=args.threshold,
+            config=SahiInferenceConfig(
+                slice_size=args.sahi_slice_size,
+                overlap_ratio=args.sahi_overlap,
+                postprocess_type=args.sahi_postprocess,
+            ),
+        )
+        print(
+            f"SAHI inference: {sahi_predictor.slice_size}x{sahi_predictor.slice_size} tiles, "
+            f"overlap={args.sahi_overlap}, postprocess={args.sahi_postprocess}"
+        )
+
     count = 0
 
     for image_path, img_id in _iter_images(image_dir, coco, args.max_images):
@@ -204,15 +246,21 @@ def main() -> None:
             continue
 
         rgb_image = _open_rgb_image(image_path)
-        detections = model.predict(rgb_image, threshold=args.threshold)
+        if sahi_predictor is not None:
+            detections = sahi_predictor.predict(rgb_image)
+        else:
+            detections = model.predict(rgb_image, threshold=args.threshold)
         scene = _load_scene(rgb_image, detections)
         annotated = _annotate_predictions(scene, detections, class_names)
 
         n_dets = len(detections)
         if n_dets == 0:
-            max_conf = float(
-                model.predict(rgb_image, threshold=0.001).confidence.max()
-            )
+            if sahi_predictor is not None:
+                max_conf = sahi_predictor.max_confidence(rgb_image)
+            else:
+                max_conf = float(
+                    model.predict(rgb_image, threshold=0.001).confidence.max()
+                )
             print(
                 f"saved {output_dir / f'{image_path.stem}_pred.jpg'} "
                 f"(0 predictions at threshold={args.threshold}, max_conf={max_conf:.3f})"

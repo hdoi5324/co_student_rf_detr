@@ -167,7 +167,17 @@ uv run python viz_predictions.py \
   --show-gt \
   --max-images 40 \
   --output-dir outputs/costudent/viz_outputs
-  ```
+  
+  
+  uv run python viz_predictions.py \
+  --checkpoint outputs/costudent_19617_gtonly/checkpoint_last_regular.pth \
+  --image-dir datasets/exemplarsegmentation_outputs/coco_13393/images \
+  --ann-file datasets/exemplarsegmentation_outputs/coco_13393/annotations/annotations_coco.json \
+  --show-gt --threshold 0.35 \
+  --max-images 40 \
+  --output-dir outputs/costudent/viz_outputs \
+  --sahi --sahi-overlap 0.2 
+   ```
 
 
 
