@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Visualize RF-DETR checkpoint predictions on images (optional COCO GT overlay)."""
+"""Visualize checkpoint predictions on images (optional COCO GT overlay)."""
 
 from __future__ import annotations
 
@@ -12,9 +12,9 @@ import numpy as np
 import supervision as sv
 from PIL import Image
 from pycocotools.coco import COCO
-from rfdetr import RFDETR
 
 from co_student.dataset import resolve_coco_ann_path
+from co_student.predictors import RFDETRPredictor, load_predictor
 from co_student.sahi_inference import SahiInferenceConfig, SahiPredictor
 
 _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
@@ -25,7 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--checkpoint",
         required=True,
-        help="Path to an inference-ready .pth (e.g. checkpoint_best_ema.pth)",
+        help="Path to an inference-ready checkpoint (.pth for RF-DETR or Faster R-CNN)",
     )
     parser.add_argument(
         "--image-dir",
@@ -62,14 +62,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--optimize",
         action="store_true",
-        help="Call model.optimize_for_inference() before predicting",
+        help="Call model.optimize_for_inference() before predicting (RF-DETR only)",
     )
 
     sahi = parser.add_argument_group("SAHI sliced inference")
     sahi.add_argument(
         "--sahi",
         action="store_true",
-        help="Run sliced inference on full-resolution images (default: single resized pass)",
+        help="Run sliced inference on full-resolution images (RF-DETR only)",
     )
     sahi.add_argument(
         "--sahi-overlap",
@@ -217,15 +217,14 @@ def main() -> None:
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    model = RFDETR.from_checkpoint(checkpoint)
-    if args.optimize:
-        model.optimize_for_inference()
+    predictor = load_predictor(checkpoint, optimize=args.optimize)
+    class_names = predictor.class_names
 
-    class_names = model.class_names
     sahi_predictor: SahiPredictor | None = None
     if args.sahi:
-        sahi_predictor = SahiPredictor.from_rfdetr(
-            model,
+        if not isinstance(predictor, RFDETRPredictor):
+            raise SystemExit("--sahi is only supported for RF-DETR checkpoints")
+        sahi_predictor = predictor.build_sahi_predictor(
             threshold=args.threshold,
             config=SahiInferenceConfig(
                 slice_size=args.sahi_slice_size,
@@ -249,7 +248,7 @@ def main() -> None:
         if sahi_predictor is not None:
             detections = sahi_predictor.predict(rgb_image)
         else:
-            detections = model.predict(rgb_image, threshold=args.threshold)
+            detections = predictor.predict(rgb_image, threshold=args.threshold)
         scene = _load_scene(rgb_image, detections)
         annotated = _annotate_predictions(scene, detections, class_names)
 
@@ -258,9 +257,7 @@ def main() -> None:
             if sahi_predictor is not None:
                 max_conf = sahi_predictor.max_confidence(rgb_image)
             else:
-                max_conf = float(
-                    model.predict(rgb_image, threshold=0.001).confidence.max()
-                )
+                max_conf = predictor.max_confidence(rgb_image)
             print(
                 f"saved {output_dir / f'{image_path.stem}_pred.jpg'} "
                 f"(0 predictions at threshold={args.threshold}, max_conf={max_conf:.3f})"

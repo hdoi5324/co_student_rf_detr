@@ -39,10 +39,12 @@ class CoStudentDataModule(RFDETRDataModule):
         *,
         train_paths: Optional[CocoSplitPaths] = None,
         val_paths: Optional[CocoSplitPaths] = None,
+        keep_unannotated: bool = False,
     ) -> None:
         super().__init__(model_config, train_config)
         self.train_paths = train_paths
         self.val_paths = val_paths
+        self.keep_unannotated = keep_unannotated
 
         block_size = model_config.patch_size * model_config.num_windows
         self._train_collate_fn = partial(collate_costudent_batch, block_size=block_size)
@@ -113,10 +115,16 @@ class CoStudentDataModule(RFDETRDataModule):
                 resolution,
                 self.train_paths,
                 augment_seed=seed,
+                keep_unannotated=self.keep_unannotated,
             )
         if not getattr(self.train_config, "dataset_dir", None):
             raise ValueError("train_config.dataset_dir is required for Co-Student training")
-        return build_costudent_train_from_roboflow(ns, resolution, augment_seed=seed)
+        return build_costudent_train_from_roboflow(
+            ns,
+            resolution,
+            augment_seed=seed,
+            keep_unannotated=self.keep_unannotated,
+        )
 
     def _build_val_dataset(self, ns, resolution: int):
         if self.val_paths is not None:

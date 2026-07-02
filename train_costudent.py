@@ -18,9 +18,9 @@ from co_student.checkpoint_resume import (
     load_weights_only_checkpoint,
 )
 from co_student.coco_eval_callback import CoStudentCOCOEvalCallback
-from co_student.coco_merge import merge_coco_sources, resolve_train_sources, sources_to_config
+from co_student.data_args import add_dataset_args, resolve_dataset_paths
 from co_student.datamodule import CoStudentDataModule
-from co_student.dataset import count_categories, split_paths_from_args
+from co_student.dataset import count_categories, summarize_coco_split
 from co_student.mean_teacher_ema import CoStudentMeanTeacherCallback
 from co_student.module import CoStudentConfig, CoStudentRFDETRModule
 from co_student.sahi_slice import prepare_sliced_train_paths
@@ -31,43 +31,7 @@ from rfdetr.training.callbacks.ema import RFDETREMACallback
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    data = parser.add_argument_group("dataset")
-    data.add_argument(
-        "--train-manifest",
-        default=None,
-        help="JSON manifest listing train_sources (image_dir + ann_file per source)",
-    )
-    data.add_argument(
-        "--train-source",
-        action="append",
-        default=None,
-        metavar="SPEC",
-        help=(
-            "Training source as image_dir:ann_path or name:image_dir:ann_path. "
-            "Repeat for multiple sources."
-        ),
-    )
-    data.add_argument(
-        "--train-merge-cache-dir",
-        default=None,
-        help="Cache directory for merged training COCO (default: <output-dir>/merged_train)",
-    )
-    data.add_argument(
-        "--val-image-dir",
-        default=None,
-        help="Directory containing validation images",
-    )
-    data.add_argument(
-        "--val-ann-dir",
-        default=None,
-        help="Directory containing the validation COCO JSON",
-    )
-    data.add_argument(
-        "--val-ann-file",
-        default=None,
-        help="Path to validation COCO JSON (overrides --val-ann-dir if both are set)",
-    )
-
+    add_dataset_args(parser)
     model = parser.add_argument_group("model")
     model.add_argument(
         "--task",
@@ -270,37 +234,6 @@ def _parse_epoch_list(value: str) -> list[int]:
     return epochs
 
 
-def _ann_arg(file_arg: str | None, dir_arg: str | None) -> str | None:
-    if file_arg:
-        return file_arg
-    return dir_arg
-
-
-def _resolve_dataset_args(
-    args: argparse.Namespace,
-    *,
-    output_dir: Path,
-) -> tuple[str, object, object | None, list[dict[str, str]]]:
-    try:
-        train_sources = resolve_train_sources(
-            manifest=args.train_manifest,
-            train_source_args=args.train_source,
-        )
-    except ValueError as exc:
-        raise SystemExit(str(exc)) from exc
-    merge_cache_dir = Path(args.train_merge_cache_dir or output_dir / "merged_train")
-    train_paths = merge_coco_sources(train_sources, merge_cache_dir)
-    train_sources_config = sources_to_config(train_sources)
-
-    val_ann = _ann_arg(args.val_ann_file, args.val_ann_dir)
-    val_paths = None
-    if args.val_image_dir and val_ann:
-        val_paths = split_paths_from_args(args.val_image_dir, val_ann)
-
-    dataset_dir = str(train_paths.image_dir.parent)
-    return dataset_dir, train_paths, val_paths, train_sources_config
-
-
 def _log_wandb_config(trainer, config: dict) -> None:
     """Push hyperparameters and run metadata to the active W&B run."""
     try:
@@ -337,13 +270,24 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    dataset_dir, train_paths, val_paths, train_sources_config = _resolve_dataset_args(
-        args,
-        output_dir=output_dir,
-    )
+    resolved = resolve_dataset_paths(args, output_dir=output_dir)
+    dataset_dir = resolved.dataset_dir
+    train_paths = resolved.train_paths
+    val_paths = resolved.val_paths
+    train_sources_config = resolved.train_sources_config
     print(f"Merged training data: {train_paths.ann_path}")
     print(f"  images: {train_paths.image_dir}")
     print(f"  sources: {len(train_sources_config)}")
+    train_summary = summarize_coco_split(train_paths.ann_path)
+    print(
+        f"  COCO JSON: {train_summary.total_images} images "
+        f"({train_summary.annotated_images} annotated, "
+        f"{train_summary.unannotated_images} unannotated)"
+    )
+    if args.keep_unannotated:
+        print("  keeping unannotated training images")
+    else:
+        print("  dropping unannotated training images (default)")
 
     import rfdetr.variants as variants
 
@@ -449,6 +393,7 @@ def main() -> None:
         train_config=train_config,
         train_paths=train_paths,
         val_paths=val_paths,
+        keep_unannotated=args.keep_unannotated,
     )
 
     trainer = build_trainer(train_config, wrapper.model_config)
@@ -488,6 +433,7 @@ def main() -> None:
                 "model": args.model,
                 "freeze_encoder": args.freeze_encoder,
                 "use_pseudo_labels": use_pseudo_labels,
+                "keep_unannotated": args.keep_unannotated,
                 "num_classes": wrapper.model_config.num_classes,
                 **train_config.model_dump(),
                 **costudent_config.__dict__,
@@ -528,6 +474,7 @@ def main() -> None:
                 "model_name": model_map[args.model],
                 "freeze_encoder": args.freeze_encoder,
                 "use_pseudo_labels": use_pseudo_labels,
+                "keep_unannotated": args.keep_unannotated,
                 "model_config": wrapper.model_config.model_dump(),
                 "class_names": list(class_names) if class_names else None,
                 "train_config": train_config.model_dump(),

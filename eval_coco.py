@@ -1,25 +1,14 @@
 #!/usr/bin/env python3
-"""Run RF-DETR inference on a COCO dataset and evaluate against ground truth."""
+"""Run detection inference on a COCO dataset and evaluate against ground truth."""
 
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 
-from PIL import Image
-from pycocotools.coco import COCO
-from rfdetr import RFDETR
-from tqdm import tqdm
-
-from co_student.coco_eval_utils import (
-    build_label_to_coco_category_id,
-    detections_to_coco_predictions,
-    run_coco_eval,
-    save_eval_outputs,
-)
 from co_student.dataset import resolve_coco_ann_path
-from co_student.sahi_inference import SahiInferenceConfig, SahiPredictor
+from co_student.eval_runner import evaluate_predictor_on_coco
+from co_student.predictors import load_predictor
 
 
 def parse_args() -> argparse.Namespace:
@@ -27,7 +16,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--checkpoint",
         required=True,
-        help="Path to an inference-ready .pth (e.g. checkpoint_best_ema.pth)",
+        help="Path to an inference-ready checkpoint (.pth for RF-DETR or Faster R-CNN)",
     )
     parser.add_argument(
         "--image-dir",
@@ -59,14 +48,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--optimize",
         action="store_true",
-        help="Call model.optimize_for_inference() before predicting",
+        help="Call model.optimize_for_inference() before predicting (RF-DETR only)",
     )
 
     sahi = parser.add_argument_group("SAHI sliced inference")
     sahi.add_argument(
         "--sahi",
         action="store_true",
-        help="Run sliced inference on full-resolution images (default: single resized pass)",
+        help="Run sliced inference on full-resolution images (RF-DETR only)",
     )
     sahi.add_argument(
         "--sahi-overlap",
@@ -87,11 +76,6 @@ def parse_args() -> argparse.Namespace:
         help="How to merge overlapping tile predictions (default: GREEDYNMM)",
     )
     return parser.parse_args()
-
-
-def _open_rgb_image(path: Path) -> Image.Image:
-    with Image.open(path) as image:
-        return image.convert("RGB")
 
 
 def _print_overall_metrics(overall: dict[str, float]) -> None:
@@ -130,92 +114,26 @@ def main() -> None:
     if not image_dir.is_dir():
         raise SystemExit(f"Image directory not found: {image_dir}")
 
-    coco_gt = COCO(str(ann_path))
-    img_ids = coco_gt.getImgIds()
-    if args.max_images is not None:
-        img_ids = img_ids[: args.max_images]
-    if not img_ids:
-        raise SystemExit("No images found in the COCO annotation file.")
-
-    model = RFDETR.from_checkpoint(checkpoint)
-    if args.optimize:
-        model.optimize_for_inference()
-
-    class_names = model.class_names
-    label_to_category_id = build_label_to_coco_category_id(class_names, coco_gt)
-
-    sahi_predictor: SahiPredictor | None = None
+    predictor = load_predictor(checkpoint, optimize=args.optimize)
     if args.sahi:
-        sahi_predictor = SahiPredictor.from_rfdetr(
-            model,
-            threshold=args.threshold,
-            config=SahiInferenceConfig(
-                slice_size=args.sahi_slice_size,
-                overlap_ratio=args.sahi_overlap,
-                postprocess_type=args.sahi_postprocess,
-            ),
-        )
         print(
-            f"SAHI inference: {sahi_predictor.slice_size}x{sahi_predictor.slice_size} tiles, "
-            f"overlap={args.sahi_overlap}, postprocess={args.sahi_postprocess}"
+            f"SAHI inference: overlap={args.sahi_overlap}, postprocess={args.sahi_postprocess}"
         )
     else:
-        print("Standard inference: full-image resize to model resolution")
+        print("Standard inference: full-image pass")
 
-    predictions: list[dict[str, object]] = []
-    missing_images = 0
-
-    for img_id in tqdm(img_ids, desc="Inference"):
-        info = coco_gt.loadImgs(img_id)[0]
-        image_path = image_dir / info["file_name"]
-        if not image_path.is_file():
-            missing_images += 1
-            continue
-
-        rgb_image = _open_rgb_image(image_path)
-        if sahi_predictor is not None:
-            detections = sahi_predictor.predict(rgb_image)
-        else:
-            detections = model.predict(rgb_image, threshold=args.threshold)
-
-        predictions.extend(
-            detections_to_coco_predictions(
-                detections,
-                int(img_id),
-                label_to_category_id,
-            )
-        )
-
-    if missing_images:
-        print(f"Warning: skipped {missing_images} image(s) missing from {image_dir}")
-
-    if not predictions:
-        raise SystemExit(
-            "No predictions produced. Check checkpoint, category mapping, and threshold."
-        )
-
-    _, overall, per_class = run_coco_eval(coco_gt, predictions, iou_type="bbox")
-
-    eval_config = {
-        "checkpoint": str(checkpoint),
-        "image_dir": str(image_dir),
-        "ann_file": str(ann_path),
-        "threshold": args.threshold,
-        "num_images": len(img_ids),
-        "num_predictions": len(predictions),
-        "sahi": args.sahi,
-        "sahi_overlap": args.sahi_overlap if args.sahi else None,
-        "sahi_slice_size": sahi_predictor.slice_size if sahi_predictor else None,
-        "sahi_postprocess": args.sahi_postprocess if args.sahi else None,
-    }
-    save_eval_outputs(
-        output_dir,
-        predictions=predictions,
-        overall=overall,
-        per_class=per_class,
-        label_to_category_id=label_to_category_id,
-        class_names=class_names,
-        eval_config=eval_config,
+    overall, per_class = evaluate_predictor_on_coco(
+        predictor,
+        image_dir=image_dir,
+        ann_path=ann_path,
+        output_dir=output_dir,
+        threshold=args.threshold,
+        max_images=args.max_images,
+        sahi=args.sahi,
+        sahi_overlap=args.sahi_overlap,
+        sahi_slice_size=args.sahi_slice_size,
+        sahi_postprocess=args.sahi_postprocess,
+        eval_config_extra={"checkpoint": str(checkpoint)},
     )
 
     _print_overall_metrics(overall)

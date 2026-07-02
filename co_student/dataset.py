@@ -90,6 +90,47 @@ def drop_unannotated_images(dataset: CocoDetection) -> CocoDetection:
     return dataset
 
 
+def filter_unannotated_train_images(
+    dataset: CocoDetection,
+    *,
+    keep_unannotated: bool = False,
+) -> CocoDetection:
+    """Return *dataset*, optionally dropping images that have no instance annotations."""
+    if keep_unannotated:
+        logger.info(
+            "Keeping all %d training images (including those with no annotations)",
+            len(dataset.ids),
+        )
+        return dataset
+    return drop_unannotated_images(dataset)
+
+
+@dataclass(frozen=True)
+class CocoSplitSummary:
+    """Image counts for a COCO split."""
+
+    total_images: int
+    annotated_images: int
+    unannotated_images: int
+
+
+def summarize_coco_split(ann_path: str | Path) -> CocoSplitSummary:
+    """Count total, annotated, and unannotated images in a COCO JSON file."""
+    with open(resolve_coco_ann_path(ann_path), encoding="utf-8") as handle:
+        data = json.load(handle)
+
+    image_ids = {int(image["id"]) for image in data.get("images", [])}
+    annotated_ids = {int(annotation["image_id"]) for annotation in data.get("annotations", [])}
+    annotated_ids &= image_ids
+    total = len(image_ids)
+    annotated = len(annotated_ids)
+    return CocoSplitSummary(
+        total_images=total,
+        annotated_images=annotated,
+        unannotated_images=total - annotated,
+    )
+
+
 def build_coco_base_from_paths(
     image_set: str,
     args: Any,
@@ -129,17 +170,19 @@ def build_costudent_train_dataset(
     augment_seed: int = 0,
     flip_prob: float = 0.5,
     remap_category_ids: bool = True,
+    keep_unannotated: bool = False,
 ) -> CoStudentCocoDataset:
     """Training dataset with raw / weak / strong views and transform matrices."""
     include_masks = getattr(args, "segmentation_head", False)
-    base = drop_unannotated_images(
+    base = filter_unannotated_train_images(
         build_coco_base_from_paths(
             "train",
             args,
             resolution,
             paths,
             remap_category_ids=remap_category_ids,
-        )
+        ),
+        keep_unannotated=keep_unannotated,
     )
     return CoStudentCocoDataset(
         base,
@@ -156,6 +199,7 @@ def build_costudent_train_from_roboflow(
     *,
     augment_seed: int = 0,
     flip_prob: float = 0.5,
+    keep_unannotated: bool = False,
 ) -> CoStudentCocoDataset:
     """Co-Student train set from Roboflow layout under ``args.dataset_dir``."""
     root = Path(args.dataset_dir).expanduser().resolve()
@@ -171,14 +215,15 @@ def build_costudent_train_from_roboflow(
         ann_file,
         resolution,
     )
-    base = drop_unannotated_images(
+    base = filter_unannotated_train_images(
         CocoDetection(
             img_folder,
             ann_file,
             transforms=None,
             include_masks=include_masks,
             remap_category_ids=True,
-        )
+        ),
+        keep_unannotated=keep_unannotated,
     )
     return CoStudentCocoDataset(
         base,

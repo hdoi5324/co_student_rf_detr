@@ -4,6 +4,19 @@
 
 BBox Co-Student training with pseudo-label merging across weak/strong views:
 
+
+
+## What I tried
+
+* CoStudent sparse training - not producing great results.  Assume it's the data is mainly annotated with some noise.
+* Model size - Not much diff between nano, small, Medium
+* SAHI - Used in training and inference. Use resolution that the model uses.  Uses square inputs to so removes distortion.
+* Backbone - freeze backbone seems to be recommended. Ablation
+* lr - stick with default.  Ablation
+* weight_decay = 5e-4 reduced to cater for smaller dataset. Ablation
+* Training with and without negative examples.
+* 
+
 ```bash
 uv run python train_costudent.py \
   --task detection \
@@ -186,13 +199,31 @@ uv run python train_costudent.py \
 ### coco eval
 ```bash
 uv run python eval_coco.py \
-  --checkpoint outputs/costudent_19617_sahi_withneg/checkpoint_last_regular.pth \
+  --checkpoint outputs/costudent_multi/checkpoint_best_regular.pth \
   --image-dir datasets/exemplarsegmentation_outputs/coco_13393/images \
   --ann-file datasets/exemplarsegmentation_outputs/coco_13393/annotations/annotations_coco.json \
   --sahi --sahi-overlap 0.2 --threshold 0.1 \
-  --output-dir outputs/costudent_19617_sahi_withneg/eval_sahi
+  --output-dir outputs/costudent_multi/eval_sahi
+  
+uv run python eval_coco.py \
+--checkpoint outputs/costudent_multi/checkpoint_best_regular.pth \
+--image-dir datasets/exemplarsegmentation_outputs/coco_13393/images \
+--ann-file datasets/exemplarsegmentation_outputs/coco_13393/annotations/annotations_coco.json \
+--threshold 0.1 \
+--output-dir outputs/costudent_multi/eval
   ```
 
+## Faster-RCNN training
+```bash
+uv run python train_faster_rcnn.py \
+--train-manifest configs/train_19616_19633.json \
+--val-image-dir datasets/exemplarsegmentation_outputs/coco_13393/images \
+--val-ann-file datasets/exemplarsegmentation_outputs/coco_13393/annotations/annotations_coco.json \
+--wandb --wandb-project faster_rcnn \
+  --output-dir ./outputs/faster_rcnn_multi \
+  --epochs 50 \
+  --batch-size 4
+  ```
 
 ## Parameter changes
 weight-decay - set higher to clamp down large weight changes due to small dataset 3e-4

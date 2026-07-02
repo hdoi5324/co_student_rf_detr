@@ -13,3 +13,4 @@ build/
 .idea/
 /outputs/
 /viz_outputs/
+/wandb/
