@@ -14,6 +14,7 @@ from rfdetr.training.trainer import build_trainer
 from co_student.coco_eval_callback import CoStudentCOCOEvalCallback
 from co_student.datamodule import CoStudentDataModule
 from co_student.dataset import count_categories, split_paths_from_args
+from co_student.sahi_slice import prepare_sliced_train_paths
 from co_student.mean_teacher_ema import CoStudentMeanTeacherCallback
 from co_student.module import CoStudentConfig, CoStudentRFDETRModule
 from co_student.train_config import CoStudentTrainConfig
@@ -159,6 +160,35 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="W&B run name (default: unique name from model + UTC timestamp)",
     )
+
+    sahi = parser.add_argument_group("SAHI training slices")
+    sahi.add_argument(
+        "--sahi-slice",
+        action="store_true",
+        help="Pre-slice training COCO into model-resolution windows before training",
+    )
+    sahi.add_argument(
+        "--sahi-overlap",
+        type=float,
+        default=0.2,
+        help="Fractional overlap between adjacent train tiles (default: 0.2)",
+    )
+    sahi.add_argument(
+        "--sahi-min-area-ratio",
+        type=float,
+        default=0.1,
+        help="Drop clipped boxes retaining less than this fraction of area (default: 0.1)",
+    )
+    sahi.add_argument(
+        "--sahi-keep-negative-samples",
+        action="store_true",
+        help="Include sliced tiles with no annotations (default: drop empty tiles)",
+    )
+    sahi.add_argument(
+        "--sahi-cache-dir",
+        default=None,
+        help="Directory for cached sliced train data (default: <output-dir>/sahi_train)",
+    )
     return parser.parse_args()
 
 
@@ -245,6 +275,41 @@ def main() -> None:
 
     model_cls = getattr(variants, MODEL_MAP[args.model])
     wrapper = model_cls(freeze_encoder=args.freeze_encoder)
+
+    sahi_slice_config: dict[str, object] | None = None
+    if args.sahi_slice:
+        if train_paths is None:
+            raise SystemExit(
+                "--sahi-slice requires explicit --train-image-dir and "
+                "--train-ann-dir/--train-ann-file"
+            )
+        slice_size = int(wrapper.model_config.resolution)
+        cache_dir = Path(args.sahi_cache_dir or output_dir / "sahi_train")
+        train_paths = prepare_sliced_train_paths(
+            train_paths,
+            slice_size=slice_size,
+            overlap_ratio=args.sahi_overlap,
+            min_area_ratio=args.sahi_min_area_ratio,
+            ignore_negative_samples=not args.sahi_keep_negative_samples,
+            cache_dir=cache_dir,
+        )
+        sahi_slice_config = {
+            "enabled": True,
+            "slice_size": slice_size,
+            "overlap_ratio": args.sahi_overlap,
+            "min_area_ratio": args.sahi_min_area_ratio,
+            "keep_negative_samples": args.sahi_keep_negative_samples,
+            "cache_dir": str(cache_dir),
+            "train_image_dir": str(train_paths.image_dir),
+            "train_ann_file": str(train_paths.ann_path),
+        }
+        print(
+            f"SAHI train slicing: {slice_size}x{slice_size} tiles, "
+            f"overlap={args.sahi_overlap}, "
+            f"keep_negative_samples={args.sahi_keep_negative_samples}"
+        )
+        print(f"  images: {train_paths.image_dir}")
+        print(f"  annotations: {train_paths.ann_path}")
 
     if args.wandb_run:
         wandb_run_name = args.wandb_run
@@ -347,6 +412,7 @@ def main() -> None:
                 "train_ann_file": str(train_paths.ann_path) if train_paths else None,
                 "val_image_dir": str(val_paths.image_dir) if val_paths else None,
                 "val_ann_file": str(val_paths.ann_path) if val_paths else None,
+                **({"sahi_slice": sahi_slice_config} if sahi_slice_config else {}),
             },
         )
 
@@ -369,6 +435,7 @@ def main() -> None:
                     if val_paths
                     else None
                 ),
+                "sahi_slice": sahi_slice_config,
             },
             indent=2,
         )
