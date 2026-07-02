@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train RF-DETR with Co-Student for sparsely annotated object detection."""
+"""Train RF-DETR with Co-Student for sparsely annotated object detection or segmentation."""
 
 from __future__ import annotations
 
@@ -9,9 +9,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from rfdetr.config import TrainConfig
 from rfdetr.training.trainer import build_trainer
 
+from co_student.checkpoint_callback import EnrichInferenceCheckpointsCallback
+from co_student.checkpoint_resume import (
+    checkpoint_needs_weights_only_resume,
+    load_checkpoint_dict,
+    load_weights_only_checkpoint,
+)
 from co_student.coco_eval_callback import CoStudentCOCOEvalCallback
 from co_student.datamodule import CoStudentDataModule
 from co_student.dataset import count_categories, split_paths_from_args
@@ -61,19 +66,47 @@ def parse_args() -> argparse.Namespace:
         help="Path to validation COCO JSON (overrides --val-ann-dir if both are set)",
     )
 
-    parser.add_argument("--output-dir", default="./output/costudent", help="Checkpoints and logs")
-    parser.add_argument("--model", default="nano", choices=["nano", "small", "medium", "large"])
-    parser.add_argument(
+    model = parser.add_argument_group("model")
+    model.add_argument(
+        "--task",
+        default="detection",
+        choices=["detection", "segmentation"],
+        help="Train a bbox detector (default) or an RF-DETR Seg model with mask supervision",
+    )
+    model.add_argument("--model", default="nano", choices=["nano", "small", "medium", "large"])
+    model.add_argument(
         "--freeze-encoder",
         action="store_true",
         help="Freeze DINOv2 backbone weights (ModelConfig freeze_encoder=True)",
     )
-    parser.add_argument("--epochs", type=int, default=100)
+    model.add_argument(
+        "--focal-alpha",
+        type=float,
+        default=0.25,
+        help="Focal loss alpha for classification loss and Hungarian matching (default: 0.25)",
+    )
+
+    pseudo = parser.add_argument_group("Co-Student pseudo labels")
+    pseudo.add_argument(
+        "--pseudo-labels",
+        dest="pseudo_labels",
+        action="store_true",
+        default=None,
+        help="Enable bbox pseudo-label merging across weak/strong views (default: on for detection)",
+    )
+    pseudo.add_argument(
+        "--no-pseudo-labels",
+        dest="pseudo_labels",
+        action="store_false",
+        help="Train on sparse GT only (default for segmentation; required until mask pseudo-labels exist)",
+    )
+
+    parser.add_argument("--output-dir", default="./outputs/costudent", help="Checkpoints and logs")
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--grad-accum-steps", type=int, default=4)
-    parser.add_argument("--lr", type=float, default=1e-5)
-    parser.add_argument("--lr-encoder", type=float, default=1.5e-5)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr-encoder", type=float, default=1.5e-4)
     parser.add_argument(
         "--weight-decay",
         type=float,
@@ -113,6 +146,14 @@ def parse_args() -> argparse.Namespace:
         help="LR multiplier at each drop epoch (default: 0.1)",
     )
     parser.add_argument("--resume", default=None, help="Path to checkpoint to resume")
+    parser.add_argument(
+        "--resume-weights-only",
+        action="store_true",
+        help=(
+            "Load model weights, EMA, and epoch counter only (fresh optimizer). "
+            "Auto-enabled when the checkpoint has no optimizer/LR scheduler state."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--student-score-thresh", type=float, default=0.5)
     parser.add_argument("--teacher-score-thresh", type=float, default=0.6)
@@ -145,7 +186,7 @@ def parse_args() -> argparse.Namespace:
     ema.add_argument(
         "--ema-warm-up",
         type=int,
-        default=0,
+        default=100,
         help="MeanTeacher warm_up (only with --mean-teacher; 0 matches CoStudent FCOS config)",
     )
 
@@ -164,12 +205,29 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-MODEL_MAP = {
+MODEL_MAP_DETECTION = {
     "nano": "RFDETRNano",
     "small": "RFDETRSmall",
     "medium": "RFDETRMedium",
     "large": "RFDETRLarge",
 }
+
+MODEL_MAP_SEGMENTATION = {
+    "nano": "RFDETRSegNano",
+    "small": "RFDETRSegSmall",
+    "medium": "RFDETRSegMedium",
+    "large": "RFDETRSegLarge",
+}
+
+
+def _resolve_pseudo_labels(args: argparse.Namespace) -> bool:
+    if args.pseudo_labels is not None:
+        return args.pseudo_labels
+    return True
+
+
+def _validate_task_args(args: argparse.Namespace, use_pseudo_labels: bool) -> None:
+    del args, use_pseudo_labels
 
 
 def _parse_epoch_list(value: str) -> list[int]:
@@ -238,6 +296,9 @@ def _align_num_classes(wrapper, train_ann_path: Path | None, dataset_dir: str) -
 
 def main() -> None:
     args = parse_args()
+    use_pseudo_labels = _resolve_pseudo_labels(args)
+    _validate_task_args(args, use_pseudo_labels)
+
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -245,8 +306,17 @@ def main() -> None:
 
     import rfdetr.variants as variants
 
-    model_cls = getattr(variants, MODEL_MAP[args.model])
+    model_map = MODEL_MAP_DETECTION if args.task == "detection" else MODEL_MAP_SEGMENTATION
+    model_cls = getattr(variants, model_map[args.model])
     wrapper = model_cls(freeze_encoder=args.freeze_encoder)
+
+    if args.task == "segmentation":
+        print(
+            "Segmentation task: RF-DETR Seg with mask-aware Co-Student pseudo labels "
+            "(box IoU matching, raster mask warp across views)."
+        )
+    elif not use_pseudo_labels:
+        print("Detection task with pseudo-label merging disabled; training on sparse GT only.")
 
     if args.wandb_run:
         wandb_run_name = args.wandb_run
@@ -254,7 +324,6 @@ def main() -> None:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         wandb_run_name = f"{args.model}-costudent-{stamp}-{uuid4().hex[:6]}"
 
-    train_config = TrainConfig(
     lr_drop_epochs: list[int] = []
     if args.lr_drop_epochs:
         lr_drop_epochs = _parse_epoch_list(args.lr_drop_epochs)
@@ -279,6 +348,7 @@ def main() -> None:
         ema_decay=args.ema_decay,
         ema_tau=args.ema_tau,
         ema_update_interval=args.ema_update_interval,
+        focal_alpha=args.focal_alpha,
         aug_config={},
         augmentation_backend="cpu",
         dataset_file="roboflow" if train_paths is None else "coco",
@@ -292,6 +362,7 @@ def main() -> None:
         student_score_thresh=args.student_score_thresh,
         teacher_score_thresh=args.teacher_score_thresh,
         matching_iou_thresh=args.matching_iou_thresh,
+        use_pseudo_labels=use_pseudo_labels,
     )
 
     train_ann_path = train_paths.ann_path if train_paths else None
@@ -322,6 +393,7 @@ def main() -> None:
         else cb
         for cb in trainer.callbacks
     ]
+    trainer.callbacks.append(EnrichInferenceCheckpointsCallback(output_dir))
 
     if args.mean_teacher and not args.no_ema:
         trainer.callbacks = [
@@ -341,8 +413,10 @@ def main() -> None:
         _log_wandb_config(
             trainer,
             {
+                "task": args.task,
                 "model": args.model,
                 "freeze_encoder": args.freeze_encoder,
+                "use_pseudo_labels": use_pseudo_labels,
                 "num_classes": wrapper.model_config.num_classes,
                 **train_config.model_dump(),
                 **costudent_config.__dict__,
@@ -353,13 +427,36 @@ def main() -> None:
             },
         )
 
-    trainer.fit(module, datamodule=datamodule, ckpt_path=train_config.resume)
+    resume_path = train_config.resume
+    weights_only = args.resume_weights_only
+    if resume_path:
+        peek = load_checkpoint_dict(resume_path)
+        if checkpoint_needs_weights_only_resume(peek):
+            if not weights_only:
+                print(
+                    "Checkpoint has no optimizer/LR scheduler state; "
+                    "using weights-only resume (fresh optimizer, same epoch counter)."
+                )
+            weights_only = True
 
+    if resume_path and weights_only:
+        load_weights_only_checkpoint(resume_path, module, trainer)
+        trainer.fit(module, datamodule=datamodule, ckpt_path=None)
+    else:
+        trainer.fit(module, datamodule=datamodule, ckpt_path=resume_path)
+
+    class_names = getattr(datamodule, "class_names", None)
     config_path = output_dir / "costudent_config.json"
     config_path.write_text(
         json.dumps(
             {
+                "task": args.task,
+                "model": args.model,
+                "model_name": model_map[args.model],
                 "freeze_encoder": args.freeze_encoder,
+                "use_pseudo_labels": use_pseudo_labels,
+                "model_config": wrapper.model_config.model_dump(),
+                "class_names": list(class_names) if class_names else None,
                 "train_config": train_config.model_dump(),
                 "costudent_config": costudent_config.__dict__,
                 "train_paths": (
@@ -381,4 +478,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

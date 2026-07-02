@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Dict, Optional, Tuple, Union
 
 import torch
 from rfdetr._namespace import _namespace_from_configs
+from rfdetr.models._defaults import MODEL_DEFAULTS
+from rfdetr.models.lwdetr import build_criterion_from_config
 from rfdetr.training.callbacks.ema import RFDETREMACallback
 from rfdetr.training.module_model import RFDETRModelModule
 from rfdetr.training.param_groups import get_param_dict
@@ -18,6 +20,7 @@ logger = get_logger()
 from co_student.pseudo_labels import (
     cvt_detections,
     merge_ground_truth,
+    outputs_for_postprocess,
     result_to_detections,
     revision_pred,
 )
@@ -32,6 +35,7 @@ class CoStudentConfig:
     teacher_score_thresh: float = 0.6
     matching_iou_thresh: float = 0.5
     nms_thresh: float = 0.5
+    use_pseudo_labels: bool = True
 
 
 class CoStudentRFDETRModule(RFDETRModelModule):
@@ -46,6 +50,19 @@ class CoStudentRFDETRModule(RFDETRModelModule):
         super().__init__(model_config, train_config)
         self.costudent_config = costudent_config or CoStudentConfig()
         self._warned_multi_scale: bool = False
+        self._apply_focal_alpha()
+
+    def _apply_focal_alpha(self) -> None:
+        """Rebuild criterion/matcher when focal_alpha differs from RF-DETR defaults."""
+        focal_alpha = float(getattr(self.train_config, "focal_alpha", MODEL_DEFAULTS.focal_alpha))
+        if focal_alpha == MODEL_DEFAULTS.focal_alpha:
+            return
+        defaults = replace(MODEL_DEFAULTS, focal_alpha=focal_alpha)
+        self.criterion, self.postprocess = build_criterion_from_config(
+            self.model_config,
+            self.train_config,
+            defaults=defaults,
+        )
 
     def configure_optimizers(self) -> Dict[str, Any]:
         """AdamW + LambdaLR with multi-epoch step decay from CoStudentTrainConfig."""
@@ -135,61 +152,71 @@ class CoStudentRFDETRModule(RFDETRModelModule):
         weak_outputs = self.model(weak_samples, weak_targets)
         strong_outputs = self.model(strong_samples, strong_targets)
 
-        with torch.no_grad():
-            def _decode_batch(
-                outputs: dict[str, torch.Tensor],
-                targets: tuple[dict[str, Any], ...],
-                score_thresh: float,
-            ) -> list:
-                orig_sizes = torch.stack([t["size"] for t in targets])
-                image_sizes = [self._image_size_from_target(t) for t in targets]
-                core = {k: v for k, v in outputs.items() if k != "aux_outputs"}
-                results = self.postprocess(core, orig_sizes)
-                return [
-                    result_to_detections(results[i], image_sizes[i], score_thresh, cfg.nms_thresh)
+        if cfg.use_pseudo_labels:
+            include_masks = bool(getattr(self.model_config, "segmentation_head", False))
+            with torch.no_grad():
+                def _decode_batch(
+                    outputs: dict[str, torch.Tensor],
+                    targets: tuple[dict[str, Any], ...],
+                    score_thresh: float,
+                ) -> list:
+                    orig_sizes = torch.stack([t["size"] for t in targets])
+                    image_sizes = [self._image_size_from_target(t) for t in targets]
+                    results = self.postprocess(outputs_for_postprocess(outputs), orig_sizes)
+                    return [
+                        result_to_detections(
+                            results[i],
+                            image_sizes[i],
+                            score_thresh,
+                            cfg.nms_thresh,
+                            include_masks=include_masks,
+                        )
+                        for i in range(batch_size)
+                    ]
+
+                weak_preds = _decode_batch(weak_outputs, weak_targets, cfg.student_score_thresh)
+                strong_preds = _decode_batch(strong_outputs, strong_targets, cfg.student_score_thresh)
+
+                teacher_model = self._get_teacher_model()
+                if teacher_model is not None:
+                    teacher_outputs = teacher_model(raw_samples)
+                    teacher_preds = _decode_batch(teacher_outputs, raw_targets, cfg.teacher_score_thresh)
+                    for i in range(batch_size):
+                        tm = transforms[i]
+                        weak_size = self._image_size_from_target(weak_targets[i])
+                        strong_size = self._image_size_from_target(strong_targets[i])
+                        teacher_weak = cvt_detections(
+                            teacher_preds[i], tm["raw"], tm["weak"], weak_size
+                        )
+                        teacher_strong = cvt_detections(
+                            teacher_preds[i], tm["raw"], tm["strong"], strong_size
+                        )
+                        weak_preds[i] = revision_pred(teacher_weak, weak_preds[i])
+                        strong_preds[i] = revision_pred(teacher_strong, strong_preds[i])
+
+                weak_merged_targets = [
+                    merge_ground_truth(
+                        weak_targets[i],
+                        strong_preds[i],
+                        cfg.matching_iou_thresh,
+                        source_tm=transforms[i]["strong"],
+                        target_tm=transforms[i]["weak"],
+                    )
                     for i in range(batch_size)
                 ]
-
-            weak_preds = _decode_batch(weak_outputs, weak_targets, cfg.student_score_thresh)
-            strong_preds = _decode_batch(strong_outputs, strong_targets, cfg.student_score_thresh)
-
-            teacher_model = self._get_teacher_model()
-            if teacher_model is not None:
-                teacher_outputs = teacher_model(raw_samples)
-                teacher_preds = _decode_batch(teacher_outputs, raw_targets, cfg.teacher_score_thresh)
-                for i in range(batch_size):
-                    tm = transforms[i]
-                    weak_size = self._image_size_from_target(weak_targets[i])
-                    strong_size = self._image_size_from_target(strong_targets[i])
-                    teacher_weak = cvt_detections(
-                        teacher_preds[i], tm["raw"], tm["weak"], weak_size
+                strong_merged_targets = [
+                    merge_ground_truth(
+                        strong_targets[i],
+                        weak_preds[i],
+                        cfg.matching_iou_thresh,
+                        source_tm=transforms[i]["weak"],
+                        target_tm=transforms[i]["strong"],
                     )
-                    teacher_strong = cvt_detections(
-                        teacher_preds[i], tm["raw"], tm["strong"], strong_size
-                    )
-                    weak_preds[i] = revision_pred(teacher_weak, weak_preds[i])
-                    strong_preds[i] = revision_pred(teacher_strong, strong_preds[i])
-
-            weak_merged_targets = [
-                merge_ground_truth(
-                    weak_targets[i],
-                    strong_preds[i],
-                    cfg.matching_iou_thresh,
-                    source_tm=transforms[i]["strong"],
-                    target_tm=transforms[i]["weak"],
-                )
-                for i in range(batch_size)
-            ]
-            strong_merged_targets = [
-                merge_ground_truth(
-                    strong_targets[i],
-                    weak_preds[i],
-                    cfg.matching_iou_thresh,
-                    source_tm=transforms[i]["weak"],
-                    target_tm=transforms[i]["strong"],
-                )
-                for i in range(batch_size)
-            ]
+                    for i in range(batch_size)
+                ]
+        else:
+            weak_merged_targets = list(weak_targets)
+            strong_merged_targets = list(strong_targets)
 
         weak_loss, weak_dict = self._compute_branch_loss(weak_outputs, weak_merged_targets)
         strong_loss, strong_dict = self._compute_branch_loss(strong_outputs, strong_merged_targets)

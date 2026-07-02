@@ -4,12 +4,11 @@ version = "0.1.0"
 description = "RF-DETR training experiments"
 requires-python = ">=3.10,<3.14"
 dependencies = [
-    "rfdetr[train]>=1.6.0",
+    "rfdetr[train]>=1.8.2",
     "transformers>=5.1.0,<6.0",
     "torch",
     "torchvision",
     "wandb>=0.18.0",
-    "sahi",
 ]
 
 [tool.uv]

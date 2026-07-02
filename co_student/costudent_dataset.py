@@ -19,12 +19,14 @@ class CoStudentCocoDataset:
         *,
         augment_seed: int = 0,
         flip_prob: float = 0.5,
+        include_masks: bool = False,
     ) -> None:
         self.base = base
         self.augmentor = TripleViewAugmentor(
             resolution,
             flip_prob=flip_prob,
             seed=augment_seed,
+            include_masks=include_masks,
         )
 
     def __len__(self) -> int:
